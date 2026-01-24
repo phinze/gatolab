@@ -1,0 +1,9 @@
+# Go
+.go/
+bin/
+
+# Nix
+result
+
+# Temp/artifacts
+tmp/
