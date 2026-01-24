@@ -2,6 +2,10 @@ github.com/ebitengine/purego v0.8.4 h1:CF7LEKg5FFOsASUj0+QwaXf8Ht6TlFxg09+S9wz0o
 github.com/ebitengine/purego v0.8.4/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
 golang.org/x/image v0.30.0 h1:jD5RhkmVAnjqaCUXfbGBrn3lpxbknfN9w2UhHHU+5B4=
 golang.org/x/image v0.30.0/go.mod h1:SAEUTxCCMWSrJcCy/4HwavEsfZZJlYxeHLc6tTiAe/c=
+golang.org/x/image v0.35.0 h1:LKjiHdgMtO8z7Fh18nGY6KDcoEtVfsgLDPeLyguqb7I=
+golang.org/x/image v0.35.0/go.mod h1:MwPLTVgvxSASsxdLzKrl8BRFuyqMyGhLwmC+TO1Sybk=
+golang.org/x/text v0.33.0 h1:B3njUFyqtHDUI5jMn1YIr5B0IE2U0qck04r6d4KPAxE=
+golang.org/x/text v0.33.0/go.mod h1:LuMebE6+rBincTi9+xWTY8TztLzKHc/9C1uBCG27+q8=
 rafaelmartins.com/p/streamdeck v0.0.0-20250810040445-3d55b1e87750 h1:mAzeLQ1QIAYalHIL+lF8lJen2Cw9opfQmKxgiL/Iy8Y=
 rafaelmartins.com/p/streamdeck v0.0.0-20250810040445-3d55b1e87750/go.mod h1:9cEcL3/UnztrWW+UPhl2/xq5ERlsCzjeikPWmPPT/l4=
 rafaelmartins.com/p/usbhid v0.0.0-20250616003425-c818f1cb579e h1:Xlg01Rbs6PVG1yOvNEmMjI+edsmua23REsPO+tyhOyU=
