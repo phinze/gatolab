@@ -1,129 +1,23 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	_ "embed"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"image"
-	"image/color"
-	_ "image/jpeg"
-	_ "image/png"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
-	"sync"
 	"syscall"
-	"time"
 
-	"github.com/srwiley/oksvg"
-	"github.com/srwiley/rasterx"
-	"golang.org/x/image/colornames"
-	"golang.org/x/image/draw"
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/math/fixed"
+	"github.com/phinze/gatolab/internal/coordinator"
+	"github.com/phinze/gatolab/internal/module"
+	"github.com/phinze/gatolab/internal/modules/nowplaying"
 	"rafaelmartins.com/p/streamdeck"
 )
-
-//go:embed fonts/PublicSans-Bold.ttf
-var fontBold []byte
-
-//go:embed fonts/PublicSans-Regular.ttf
-var fontRegular []byte
-
-//go:embed icons/play.svg
-var iconPlaySVG string
-
-//go:embed icons/pause.svg
-var iconPauseSVG string
-
-//go:embed icons/info.svg
-var iconInfoSVG string
-
-var (
-	titleFace  font.Face
-	artistFace font.Face
-)
-
-// NowPlaying represents the media-control JSON output (with --micros flag)
-type NowPlaying struct {
-	Title                string `json:"title"`
-	Artist               string `json:"artist"`
-	Album                string `json:"album"`
-	DurationMicros       int64  `json:"durationMicros"`
-	ElapsedTimeMicros    int64  `json:"elapsedTimeMicros"`
-	TimestampEpochMicros int64  `json:"timestampEpochMicros"`
-	Playing              bool   `json:"playing"`
-	ArtworkData          string `json:"artworkData"`
-	ArtworkMime          string `json:"artworkMimeType"`
-}
-
-// Live state updated from stream
-type LiveState struct {
-	sync.RWMutex
-	NowPlaying
-}
-
-var liveState = &LiveState{}
-
-// Layout (2 keys above left half of strip, rest available):
-// [1:---] [2:---] [3:---] [4:---]
-// [5:Play] [6:Info] [7:---] [8:---]
-
-var (
-	keyPlay = streamdeck.KEY_5
-	keyInfo = streamdeck.KEY_6
-)
-
-func initFonts() error {
-	// Parse bold font for title
-	ttBold, err := opentype.Parse(fontBold)
-	if err != nil {
-		return fmt.Errorf("failed to parse bold font: %w", err)
-	}
-
-	titleFace, err = opentype.NewFace(ttBold, &opentype.FaceOptions{
-		Size:    24,
-		DPI:     72,
-		Hinting: font.HintingFull,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create title face: %w", err)
-	}
-
-	// Parse regular font for artist
-	ttRegular, err := opentype.Parse(fontRegular)
-	if err != nil {
-		return fmt.Errorf("failed to parse regular font: %w", err)
-	}
-
-	artistFace, err = opentype.NewFace(ttRegular, &opentype.FaceOptions{
-		Size:    18,
-		DPI:     72,
-		Hinting: font.HintingFull,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create artist face: %w", err)
-	}
-
-	return nil
-}
 
 func main() {
 	log.Println("=== Stream Deck Now Playing ===")
 	log.Println("Press Ctrl+C to exit")
-
-	// Initialize fonts
-	if err := initFonts(); err != nil {
-		log.Fatalf("Failed to initialize fonts: %v", err)
-	}
-	log.Println("Fonts loaded")
 
 	// Check if media-control is available
 	if _, err := exec.LookPath("media-control"); err != nil {
@@ -151,483 +45,42 @@ func main() {
 		return device.ClearKey(key)
 	})
 
-	// Draw control icons
-	drawControlIcons(device)
+	// Create coordinator
+	coord := coordinator.New(device)
 
-	// Setup key handlers
-	setupKeyControls(device)
+	// Create and register nowplaying module
+	np := nowplaying.New(device)
+	coord.RegisterModule(np, module.Resources{
+		Keys:      []module.KeyID{module.Key5, module.Key6},
+		StripRect: image.Rect(0, 0, 400, 100),
+		Dials:     []module.DialID{module.Dial1, module.Dial2},
+	})
 
-	// Setup dial controls
-	setupDialControls(device)
-
-	// Context for cancellation
+	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Start listening for device events
+	// Run coordinator in background
 	errChan := make(chan error, 1)
 	go func() {
-		if err := device.Listen(errChan); err != nil {
-			errChan <- err
-		}
+		errChan <- coord.Start(ctx)
 	}()
-
-	// Start media-control stream in background
-	go startMediaStream(ctx)
-
-	// Update display every 500ms for smooth progress
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	var lastArtwork string
-	var lastPlaying bool
 
 	log.Println("Ready! Media controls on left keys, now playing on left half of strip")
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-sigChan:
-			log.Println("\nShutting down...")
-			cancel()
-			return
-		case err := <-errChan:
-			if err != nil {
-				log.Printf("Device error: %v", err)
-			}
-		case <-ticker.C:
-			updateDisplay(device, &lastArtwork, &lastPlaying)
-		}
-	}
-}
-
-// StreamPayload wraps the stream JSON structure with raw payload for proper merging
-type StreamPayload struct {
-	Diff    bool            `json:"diff"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-func startMediaStream(ctx context.Context) {
-	cmd := exec.CommandContext(ctx, "media-control", "stream", "--micros")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Printf("Failed to get stdout pipe: %v", err)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		log.Printf("Failed to start media-control stream: %v", err)
-		return
-	}
-
-	log.Println("Started media-control stream")
-
-	scanner := bufio.NewScanner(stdout)
-	// Increase buffer size for large artwork payloads
-	buf := make([]byte, 0, 1024*1024) // 1MB buffer
-	scanner.Buffer(buf, 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		var envelope StreamPayload
-		if err := json.Unmarshal(line, &envelope); err != nil {
-			continue
-		}
-
-		// Parse payload as a map to see which fields are present
-		var payloadMap map[string]interface{}
-		if err := json.Unmarshal(envelope.Payload, &payloadMap); err != nil {
-			continue
-		}
-
-		liveState.Lock()
-		if !envelope.Diff && len(payloadMap) == 0 {
-			// Reset to defaults
-			liveState.NowPlaying = NowPlaying{
-				Title:                "?",
-				Artist:               "?",
-				TimestampEpochMicros: time.Now().UnixMicro(),
-			}
-		} else {
-			// Merge only fields that are present in the payload
-			mergePayloadMap(&liveState.NowPlaying, payloadMap)
-		}
-		liveState.Unlock()
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Printf("Scanner error: %v", err)
-	}
-
-	cmd.Wait()
-}
-
-func mergePayloadMap(dst *NowPlaying, src map[string]interface{}) {
-	if v, ok := src["title"].(string); ok {
-		dst.Title = v
-	}
-	if v, ok := src["artist"].(string); ok {
-		dst.Artist = v
-	}
-	if v, ok := src["album"].(string); ok {
-		dst.Album = v
-	}
-	if v, ok := src["durationMicros"].(float64); ok {
-		dst.DurationMicros = int64(v)
-	}
-	if v, ok := src["elapsedTimeMicros"].(float64); ok {
-		dst.ElapsedTimeMicros = int64(v)
-	}
-	if v, ok := src["timestampEpochMicros"].(float64); ok {
-		dst.TimestampEpochMicros = int64(v)
-	}
-	// Only update playing if it's actually present in the payload
-	if v, ok := src["playing"].(bool); ok {
-		dst.Playing = v
-	}
-	if v, ok := src["artworkData"].(string); ok {
-		dst.ArtworkData = v
-	}
-	if v, ok := src["artworkMimeType"].(string); ok {
-		dst.ArtworkMime = v
-	}
-}
-
-func getLiveState() NowPlaying {
-	liveState.RLock()
-	defer liveState.RUnlock()
-	return liveState.NowPlaying
-}
-
-// Calculate live elapsed time based on timestamp and playing state
-func getLiveElapsedMicros(np *NowPlaying) int64 {
-	if !np.Playing {
-		return np.ElapsedTimeMicros
-	}
-	// Calculate: elapsed + (now - timestamp)
-	nowMicros := time.Now().UnixMicro()
-	timeDiff := nowMicros - np.TimestampEpochMicros
-	return np.ElapsedTimeMicros + timeDiff
-}
-
-// Cache for decoded artwork
-var cachedArtwork image.Image
-var cachedArtworkHash string
-
-func updateDisplay(device *streamdeck.Device, lastArtwork *string, lastPlaying *bool) {
-	np := getLiveState()
-
-	// Cache artwork for touch strip thumbnail if changed
-	if np.ArtworkData != "" && np.ArtworkData != *lastArtwork {
-		*lastArtwork = np.ArtworkData
-		if img := decodeArtwork(np.ArtworkData); img != nil {
-			cachedArtwork = img
-			cachedArtworkHash = np.ArtworkData
-		}
-		log.Printf("Track: %s - %s", np.Artist, np.Title)
-	}
-
-	// Update play/pause icon if state changed
-	if np.Playing != *lastPlaying {
-		*lastPlaying = np.Playing
-		drawPlayPauseIcon(device, np.Playing)
-	}
-
-	// Update touch strip (left half only) with album art, text, and progress
-	updateTouchStrip(device, &np)
-}
-
-func decodeArtwork(artworkBase64 string) image.Image {
-	imgData, err := base64.StdEncoding.DecodeString(artworkBase64)
-	if err != nil {
-		return nil
-	}
-	img, _, err := image.Decode(bytes.NewReader(imgData))
-	if err != nil {
-		return nil
-	}
-	return img
-}
-
-func scaleImageSquare(src image.Image, size int) image.Image {
-	srcBounds := src.Bounds()
-	srcW := srcBounds.Dx()
-	srcH := srcBounds.Dy()
-
-	var cropRect image.Rectangle
-	if srcW > srcH {
-		offset := (srcW - srcH) / 2
-		cropRect = image.Rect(offset, 0, offset+srcH, srcH)
-	} else {
-		offset := (srcH - srcW) / 2
-		cropRect = image.Rect(0, offset, srcW, offset+srcW)
-	}
-
-	dst := image.NewRGBA(image.Rect(0, 0, size, size))
-	draw.CatmullRom.Scale(dst, dst.Bounds(), src, cropRect, draw.Over, nil)
-	return dst
-}
-
-func updateTouchStrip(device *streamdeck.Device, np *NowPlaying) {
-	if !device.GetTouchStripSupported() {
-		return
-	}
-
-	rect, err := device.GetTouchStripImageRectangle()
-	if err != nil {
-		return
-	}
-
-	img := image.NewRGBA(rect)
-	fullW := rect.Dx()
-	h := rect.Dy()
-
-	// Only use left half of the strip
-	w := fullW / 2
-
-	// Background - dark (full strip to clear any previous content)
-	bgColor := color.RGBA{25, 25, 25, 255}
-	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
-
-	// Layout for left half: [Art full height] [gap] [Text + progress]
-	artSize := h // Full height bleed
-	textX := artSize + 8
-	progressH := 5
-	progressMargin := 8
-
-	// Draw album art thumbnail on left, full bleed
-	if cachedArtwork != nil {
-		artRect := image.Rect(0, 0, artSize, artSize)
-		thumb := scaleImageSquare(cachedArtwork, artSize)
-		draw.Draw(img, artRect, thumb, image.Point{}, draw.Over)
-	}
-
-	// Draw title (bold)
-	if np.Title != "" {
-		titleColor := color.White
-		drawText(img, np.Title, textX, 30, titleFace, titleColor, w-textX-10)
-	}
-
-	// Draw artist (regular, smaller, gray)
-	if np.Artist != "" {
-		artistColor := color.RGBA{180, 180, 180, 255}
-		drawText(img, np.Artist, textX, 54, artistFace, artistColor, w-textX-10)
-	}
-
-	// Calculate live elapsed time
-	elapsedMicros := getLiveElapsedMicros(np)
-	durationMicros := np.DurationMicros
-
-	// Draw progress bar at bottom
-	progress := 0.0
-	if durationMicros > 0 {
-		progress = float64(elapsedMicros) / float64(durationMicros)
-		if progress > 1.0 {
-			progress = 1.0
+	// Wait for shutdown signal or error
+	select {
+	case <-sigChan:
+		log.Println("\nShutting down...")
+		cancel()
+	case err := <-errChan:
+		if err != nil {
+			log.Printf("Coordinator error: %v", err)
 		}
 	}
 
-	// Progress bar background
-	progressBg := color.RGBA{60, 60, 60, 255}
-	progressRect := image.Rect(textX, h-progressMargin-progressH, w-10, h-progressMargin)
-	draw.Draw(img, progressRect, &image.Uniform{progressBg}, image.Point{}, draw.Src)
-
-	// Progress bar fill
-	progressColor := colornames.Limegreen
-	if !np.Playing {
-		progressColor = colornames.Orange
-	}
-	progressW := int(float64(progressRect.Dx()) * progress)
-	progressFill := image.Rect(textX, h-progressMargin-progressH, textX+progressW, h-progressMargin)
-	draw.Draw(img, progressFill, &image.Uniform{progressColor}, image.Point{}, draw.Src)
-
-	// Draw time (elapsed / total) above progress bar, right-aligned
-	if durationMicros > 0 {
-		elapsed := formatDurationMicros(elapsedMicros)
-		total := formatDurationMicros(durationMicros)
-		timeStr := fmt.Sprintf("%s / %s", elapsed, total)
-		timeColor := color.RGBA{120, 120, 120, 255}
-		drawTextRightAligned(img, timeStr, w-10, h-progressMargin-progressH-6, artistFace, timeColor)
-	}
-
-	device.SetTouchStripImage(img)
-}
-
-func formatDurationMicros(micros int64) string {
-	totalSeconds := micros / 1000000
-	m := totalSeconds / 60
-	s := totalSeconds % 60
-	return fmt.Sprintf("%d:%02d", m, s)
-}
-
-func drawText(img *image.RGBA, text string, x, y int, face font.Face, col color.Color, maxWidth int) {
-	// Truncate text if too long
-	truncated := truncateText(text, face, maxWidth)
-
-	d := &font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(col),
-		Face: face,
-		Dot:  fixed.Point26_6{X: fixed.I(x), Y: fixed.I(y)},
-	}
-	d.DrawString(truncated)
-}
-
-func drawTextRightAligned(img *image.RGBA, text string, rightX, y int, face font.Face, col color.Color) {
-	// Measure text width and draw so it ends at rightX
-	width := font.MeasureString(face, text).Ceil()
-	x := rightX - width
-
-	d := &font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(col),
-		Face: face,
-		Dot:  fixed.Point26_6{X: fixed.I(x), Y: fixed.I(y)},
-	}
-	d.DrawString(text)
-}
-
-func truncateText(text string, face font.Face, maxWidth int) string {
-	if maxWidth <= 0 {
-		return text
-	}
-
-	ellipsis := "…"
-
-	width := font.MeasureString(face, text).Ceil()
-	if width <= maxWidth {
-		return text
-	}
-
-	// Binary search for the right length
-	runes := []rune(text)
-	for i := len(runes); i > 0; i-- {
-		truncated := string(runes[:i]) + ellipsis
-		w := font.MeasureString(face, truncated).Ceil()
-		if w <= maxWidth {
-			return truncated
-		}
-	}
-
-	return ellipsis
-}
-
-func drawControlIcons(device *streamdeck.Device) {
-	drawPlayPauseIcon(device, false)
-	keyRect, _ := device.GetKeyImageRectangle()
-	size := keyRect.Dx()
-	device.SetKeyImage(keyInfo, renderSVGIcon(iconInfoSVG, size, colornames.Deepskyblue))
-}
-
-func drawPlayPauseIcon(device *streamdeck.Device, playing bool) {
-	keyRect, _ := device.GetKeyImageRectangle()
-	size := keyRect.Dx()
-
-	if playing {
-		device.SetKeyImage(keyPlay, renderSVGIcon(iconPauseSVG, size, colornames.Orange))
-	} else {
-		device.SetKeyImage(keyPlay, renderSVGIcon(iconPlaySVG, size, colornames.Limegreen))
-	}
-}
-
-// renderSVGIcon renders an SVG string to an image with the given size and color
-func renderSVGIcon(svgContent string, size int, iconColor color.Color) image.Image {
-	// Replace currentColor with the actual color
-	r, g, b, _ := iconColor.RGBA()
-	hexColor := fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
-	svgContent = strings.ReplaceAll(svgContent, "currentColor", hexColor)
-
-	// Parse SVG
-	icon, err := oksvg.ReadIconStream(strings.NewReader(svgContent))
-	if err != nil {
-		log.Printf("Failed to parse SVG: %v", err)
-		return image.NewRGBA(image.Rect(0, 0, size, size))
-	}
-
-	// Create output image with dark background
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	bgColor := color.RGBA{40, 40, 40, 255}
-	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
-
-	// Calculate scaling and centering
-	iconSize := float64(size) * 0.6 // Icon takes 60% of button
-	padding := (float64(size) - iconSize) / 2
-
-	icon.SetTarget(padding, padding, iconSize, iconSize)
-
-	// Render to image
-	scanner := rasterx.NewScannerGV(size, size, img, img.Bounds())
-	raster := rasterx.NewDasher(size, size, scanner)
-	icon.Draw(raster, 1.0)
-
-	return img
-}
-
-func setupKeyControls(device *streamdeck.Device) {
-	device.AddKeyHandler(keyPlay, func(d *streamdeck.Device, k *streamdeck.Key) error {
-		log.Println("Key: Toggle play/pause")
-		go exec.Command("media-control", "toggle-play-pause").Run()
-		k.WaitForRelease()
-		return nil
-	})
-
-	device.AddKeyHandler(keyInfo, func(d *streamdeck.Device, k *streamdeck.Key) error {
-		np := getLiveState()
-		log.Printf("Info: %s - %s (%s)", np.Artist, np.Title, np.Album)
-		k.WaitForRelease()
-		return nil
-	})
-
-	log.Println("Key controls configured")
-}
-
-func setupDialControls(device *streamdeck.Device) {
-	if device.GetDialCount() == 0 {
-		return
-	}
-
-	device.AddDialRotateHandler(streamdeck.DIAL_1, func(d *streamdeck.Device, di *streamdeck.Dial, delta int8) error {
-		seekAmount := int64(delta) * 5 * 1000000 // 5 seconds in micros
-		log.Printf("Dial: Seeking %+d seconds", delta*5)
-
-		np := getLiveState()
-		currentPos := getLiveElapsedMicros(&np)
-
-		newPos := currentPos + seekAmount
-		if newPos < 0 {
-			newPos = 0
-		}
-		if newPos > np.DurationMicros {
-			newPos = np.DurationMicros
-		}
-
-		// media-control seek takes seconds
-		cmd := exec.Command("media-control", "seek", fmt.Sprintf("%.1f", float64(newPos)/1000000))
-		cmd.Run()
-		return nil
-	})
-
-	device.AddDialSwitchHandler(streamdeck.DIAL_1, func(d *streamdeck.Device, di *streamdeck.Dial) error {
-		log.Println("Dial: Toggle play/pause")
-		go exec.Command("media-control", "toggle-play-pause").Run()
-		di.WaitForRelease()
-		return nil
-	})
-
-	device.AddDialRotateHandler(streamdeck.DIAL_2, func(d *streamdeck.Device, di *streamdeck.Dial, delta int8) error {
-		if delta < 0 {
-			log.Println("Dial: Previous track")
-			exec.Command("media-control", "previous-track").Run()
-		} else {
-			log.Println("Dial: Next track")
-			exec.Command("media-control", "next-track").Run()
-		}
-		return nil
-	})
-
-	log.Println("Dial controls: D1=seek/play-pause, D2=prev/next")
+	coord.Stop()
 }
