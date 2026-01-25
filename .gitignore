@@ -7,3 +7,6 @@ result
 
 # Temp/artifacts
 tmp/
+
+# Env Vars
+.env.local
