@@ -15,15 +15,11 @@ import (
 	"rafaelmartins.com/p/streamdeck"
 )
 
-// Entity IDs
-const (
-	entityRingLight = "light.elgato_dw01m1a02715"
-)
-
 // Config holds the Home Assistant module configuration.
 type Config struct {
-	URL   string
-	Token string
+	URL             string
+	Token           string
+	RingLightEntity string
 }
 
 // Module implements the Home Assistant control module.
@@ -113,7 +109,7 @@ func (m *Module) pollState(ctx context.Context) {
 
 // fetchRingLightState fetches the current ring light state.
 func (m *Module) fetchRingLightState(ctx context.Context) {
-	state, err := m.client.GetLightState(ctx, entityRingLight)
+	state, err := m.client.GetLightState(ctx, m.config.RingLightEntity)
 	if err != nil {
 		log.Printf("Failed to fetch ring light state: %v", err)
 		return
@@ -148,9 +144,15 @@ func loadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("HASS_TOKEN environment variable not set")
 	}
 
+	ringLightEntity := os.Getenv("HASS_RING_LIGHT_ENTITY")
+	if ringLightEntity == "" {
+		return Config{}, fmt.Errorf("HASS_RING_LIGHT_ENTITY environment variable not set")
+	}
+
 	return Config{
-		URL:   url,
-		Token: token,
+		URL:             url,
+		Token:           token,
+		RingLightEntity: ringLightEntity,
 	}, nil
 }
 
@@ -225,7 +227,7 @@ func (m *Module) toggleRingLight() error {
 	log.Println("Toggling ring light...")
 
 	err := m.client.CallService(context.Background(), "light", "toggle", map[string]any{
-		"entity_id": entityRingLight,
+		"entity_id": m.config.RingLightEntity,
 	})
 	if err != nil {
 		log.Printf("Failed to toggle ring light: %v", err)
@@ -244,8 +246,8 @@ func (m *Module) adjustRingLightBrightness(delta int8) error {
 	log.Printf("Adjusting ring light brightness by %d", step)
 
 	err := m.client.CallService(context.Background(), "light", "turn_on", map[string]any{
-		"entity_id":         entityRingLight,
-		"brightness_step":   step,
+		"entity_id":       m.config.RingLightEntity,
+		"brightness_step": step,
 	})
 	if err != nil {
 		log.Printf("Failed to adjust ring light brightness: %v", err)
