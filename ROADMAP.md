@@ -11,9 +11,18 @@ A modular Stream Deck Plus application that combines multiple utilities into a c
 - Left half of touch strip (album art, title, artist, progress)
 - Dials 1+2 for seek and prev/next
 
+**Weather Module** (implemented)
+- Right half of touch strip (icon, temp, feels like, high/low, precipitation forecast)
+- OpenWeatherMap One Call 3.0 API with minutely precipitation data
+- No keys or dials used
+
+**Daemon Mode** (implemented)
+- Persistent process that waits for device connection
+- Automatic reconnection on device disconnect
+- Automatic reconnection after system sleep/wake
+
 **Available Resources**
 - 6 keys (top row + bottom-right)
-- Right half of touch strip
 - Dials 3+4
 
 ## Planned Features
@@ -31,11 +40,10 @@ Control smart home devices, especially office setup.
 - **Dials**: D3/D4 for light brightness
 - **Data**: HA REST API or WebSocket (already on Tailscale)
 
-### Weather
+### Weather ✅
 Quick glance at current conditions and forecast.
-- **Keys**: 1 (tap for details?)
-- **Strip**: Could fit temp + icon in strip segment
-- **Data**: OpenWeatherMap API or Apple WeatherKit
+- **Strip**: Right half (400-800px) with icon, temp, feels like, high/low, precipitation
+- **Data**: OpenWeatherMap One Call 3.0 API
 
 ### Around Integration
 Team presence and status from custom Around app.
@@ -83,13 +91,19 @@ type Resources struct {
 }
 ```
 
-### Phase 2: Layout Coordinator
+### Phase 2: Layout Coordinator ✅
 
 A central coordinator that:
 - Manages module lifecycle
 - Allocates resources to modules
 - Composites strip segments into full strip image
 - Routes input events to appropriate modules
+
+**Implemented in `internal/coordinator/`:**
+- Module registration with resource allocation
+- Event routing (keys, dials, touch strip)
+- Strip compositing from multiple modules
+- Render loop with periodic updates
 
 ### Phase 3: Configuration
 
@@ -118,10 +132,10 @@ layout:
 
 ## Implementation Order
 
-1. **Module interface** - Define the contract
-2. **Refactor now-playing** - Convert to first module
-3. **Layout coordinator** - Basic resource allocation
-4. **Weather module** - Simple API, good test case
+1. ✅ **Module interface** - Define the contract
+2. ✅ **Refactor now-playing** - Convert to first module
+3. ✅ **Layout coordinator** - Basic resource allocation
+4. ✅ **Weather module** - OpenWeatherMap One Call 3.0 API
 5. **Home Assistant module** - High value, familiar API
 6. **Calendar module** - More complex, EventKit or Google API
 7. **Multi-page support** - As we run out of space
@@ -134,6 +148,7 @@ layout:
 - `rafaelmartins.com/p/streamdeck` - Stream Deck Plus support (dials, touch strip)
 - `github.com/srwiley/oksvg` - SVG icon rendering
 - `media-control` CLI - macOS now-playing info
+- `github.com/prashantgupta24/mac-sleep-notifier` - macOS sleep/wake detection
 
 ### Potential Libraries
 - Home Assistant: REST API or `github.com/home-assistant/home-assistant-go` (if exists)
