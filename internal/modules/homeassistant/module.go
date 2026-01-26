@@ -8,10 +8,16 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/phinze/gatolab/internal/module"
 	"golang.org/x/image/font"
 	"rafaelmartins.com/p/streamdeck"
+)
+
+// Entity IDs
+const (
+	entityRingLight = "light.elgato_dw01m1a02715"
 )
 
 // Config holds the Home Assistant module configuration.
@@ -30,7 +36,8 @@ type Module struct {
 	enabled bool
 
 	// State
-	mu sync.RWMutex
+	mu             sync.RWMutex
+	ringLightState LightState
 
 	// Fonts
 	labelFace font.Face
@@ -79,8 +86,49 @@ func (m *Module) Init(ctx context.Context, res module.Resources) error {
 		return err
 	}
 
+	// Start state polling
+	go m.pollState(ctx)
+
 	log.Printf("Home Assistant module initialized (url=%s)", m.config.URL)
 	return nil
+}
+
+// pollState periodically fetches entity states from Home Assistant.
+func (m *Module) pollState(ctx context.Context) {
+	// Initial fetch
+	m.fetchRingLightState(ctx)
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.fetchRingLightState(ctx)
+		}
+	}
+}
+
+// fetchRingLightState fetches the current ring light state.
+func (m *Module) fetchRingLightState(ctx context.Context) {
+	state, err := m.client.GetLightState(ctx, entityRingLight)
+	if err != nil {
+		log.Printf("Failed to fetch ring light state: %v", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.ringLightState = state
+	m.mu.Unlock()
+}
+
+// getRingLightState returns the current ring light state.
+func (m *Module) getRingLightState() LightState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.ringLightState
 }
 
 // Stop shuts down the module.
@@ -114,9 +162,14 @@ func (m *Module) RenderKeys() map[module.KeyID]image.Image {
 
 	keys := make(map[module.KeyID]image.Image)
 
-	// Render Office Time button on first allocated key
+	// Key 0: Office Time button
 	if len(m.resources.Keys) > 0 {
 		keys[m.resources.Keys[0]] = m.renderOfficeTimeButton()
+	}
+
+	// Key 1: Ring Light toggle
+	if len(m.resources.Keys) > 1 {
+		keys[m.resources.Keys[1]] = m.renderRingLightButton()
 	}
 
 	return keys
@@ -138,9 +191,14 @@ func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
 		return nil
 	}
 
-	// Handle Office Time button (first key)
+	// Key 0: Office Time button
 	if len(m.resources.Keys) > 0 && id == m.resources.Keys[0] {
 		return m.executeOfficeTime()
+	}
+
+	// Key 1: Ring Light toggle
+	if len(m.resources.Keys) > 1 && id == m.resources.Keys[1] {
+		return m.toggleRingLight()
 	}
 
 	return nil
@@ -162,8 +220,57 @@ func (m *Module) executeOfficeTime() error {
 	return nil
 }
 
+// toggleRingLight toggles the ring light on/off.
+func (m *Module) toggleRingLight() error {
+	log.Println("Toggling ring light...")
+
+	err := m.client.CallService(context.Background(), "light", "toggle", map[string]any{
+		"entity_id": entityRingLight,
+	})
+	if err != nil {
+		log.Printf("Failed to toggle ring light: %v", err)
+		return err
+	}
+
+	log.Println("Ring light toggled")
+	return nil
+}
+
+// adjustRingLightBrightness adjusts the ring light brightness by a delta.
+func (m *Module) adjustRingLightBrightness(delta int8) error {
+	// Each dial tick adjusts brightness by ~10% (25 out of 255)
+	step := int(delta) * 25
+
+	log.Printf("Adjusting ring light brightness by %d", step)
+
+	err := m.client.CallService(context.Background(), "light", "turn_on", map[string]any{
+		"entity_id":         entityRingLight,
+		"brightness_step":   step,
+	})
+	if err != nil {
+		log.Printf("Failed to adjust ring light brightness: %v", err)
+		return err
+	}
+
+	return nil
+}
+
 // HandleDial processes dial events.
 func (m *Module) HandleDial(id module.DialID, event module.DialEvent) error {
+	if !m.enabled {
+		return nil
+	}
+
+	// Only handle rotation events
+	if event.Type != module.DialRotate {
+		return nil
+	}
+
+	// Dial 0: Ring Light brightness
+	if len(m.resources.Dials) > 0 && id == m.resources.Dials[0] {
+		return m.adjustRingLightBrightness(event.Delta)
+	}
+
 	return nil
 }
 

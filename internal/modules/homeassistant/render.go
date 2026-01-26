@@ -22,11 +22,15 @@ var fontBold []byte
 //go:embed icons/lamp-desk.svg
 var iconLampDeskSVG string
 
+//go:embed icons/circle.svg
+var iconCircleSVG string
+
 // Common colors
 var (
-	colorKeyBg = color.RGBA{40, 40, 40, 255}
-	colorWhite = color.RGBA{255, 255, 255, 255}
-	colorAmber = color.RGBA{255, 191, 0, 255}
+	colorKeyBg  = color.RGBA{40, 40, 40, 255}
+	colorWhite  = color.RGBA{255, 255, 255, 255}
+	colorAmber  = color.RGBA{255, 191, 0, 255}
+	colorDimGray = color.RGBA{80, 80, 80, 255}
 )
 
 const keySize = 72
@@ -65,6 +69,47 @@ func (m *Module) renderOfficeTimeButton() image.Image {
 
 	// Draw label at bottom
 	m.drawTextCentered(img, "Office Time", keySize/2, 62, m.labelFace, colorWhite)
+
+	return img
+}
+
+// renderRingLightButton renders the Ring Light toggle button.
+func (m *Module) renderRingLightButton() image.Image {
+	state := m.getRingLightState()
+
+	img := image.NewRGBA(image.Rect(0, 0, keySize, keySize))
+
+	// Background
+	draw.Draw(img, img.Bounds(), &image.Uniform{colorKeyBg}, image.Point{}, draw.Src)
+
+	// Choose icon color based on state
+	var iconColor color.Color
+	var labelText string
+
+	if state.On {
+		// Scale brightness (0-255) to color intensity
+		brightness := state.Brightness
+		if brightness == 0 {
+			brightness = 255 // Default to full if on but no brightness reported
+		}
+		// Create a warm white color scaled by brightness
+		iconColor = color.RGBA{brightness, brightness, uint8(float64(brightness) * 0.9), 255}
+		// Show percentage
+		pct := int(float64(brightness) / 255.0 * 100)
+		labelText = fmt.Sprintf("Ring %d%%", pct)
+	} else {
+		iconColor = colorDimGray
+		labelText = "Ring Light"
+	}
+
+	// Draw icon in upper portion
+	iconImg := renderSVGIcon(iconCircleSVG, 40, iconColor)
+	iconX := (keySize - 40) / 2
+	iconY := 8
+	draw.Draw(img, image.Rect(iconX, iconY, iconX+40, iconY+40), iconImg, image.Point{}, draw.Over)
+
+	// Draw label at bottom
+	m.drawTextCentered(img, labelText, keySize/2, 62, m.labelFace, colorWhite)
 
 	return img
 }

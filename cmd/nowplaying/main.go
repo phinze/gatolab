@@ -132,7 +132,8 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan
 
 	ha := homeassistant.New(device)
 	coord.RegisterModule(ha, module.Resources{
-		Keys: []module.KeyID{module.Key1},
+		Keys:  []module.KeyID{module.Key1, module.Key2},
+		Dials: []module.DialID{module.Dial4},
 	})
 
 	// Run coordinator with a child context so we can stop it independently

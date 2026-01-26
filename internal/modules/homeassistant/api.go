@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// LightState represents the state of a light entity.
+type LightState struct {
+	On         bool
+	Brightness uint8 // 0-255
+}
+
 // Client is a Home Assistant API client.
 type Client struct {
 	baseURL    string
@@ -63,4 +69,47 @@ func (c *Client) CallService(ctx context.Context, domain, service string, data m
 	}
 
 	return nil
+}
+
+// GetLightState fetches the current state of a light entity.
+func (c *Client) GetLightState(ctx context.Context, entityID string) (LightState, error) {
+	url := fmt.Sprintf("%s/api/states/%s", c.baseURL, entityID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return LightState{}, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return LightState{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return LightState{}, fmt.Errorf("API error: %s", resp.Status)
+	}
+
+	var data struct {
+		State      string `json:"state"`
+		Attributes struct {
+			Brightness *int `json:"brightness"`
+		} `json:"attributes"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return LightState{}, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	state := LightState{
+		On: data.State == "on",
+	}
+
+	if data.Attributes.Brightness != nil {
+		state.Brightness = uint8(*data.Attributes.Brightness)
+	}
+
+	return state, nil
 }
