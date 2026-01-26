@@ -90,8 +90,6 @@ func waitForDevice(ctx context.Context) *streamdeck.Device {
 
 // runWithDevice runs the coordinator with the given device until disconnect or context cancel.
 func runWithDevice(ctx context.Context, device *streamdeck.Device) {
-	defer device.Close()
-
 	log.Printf("Connected to: %s", device.GetModelName())
 
 	// Set brightness and clear keys
@@ -149,5 +147,17 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		log.Println("Cleanup timed out")
+	}
+
+	// Close device in background - don't block on it
+	go device.Close()
+
+	// If parent context is cancelled (shutdown signal), force exit
+	// since device.Close() may block indefinitely
+	select {
+	case <-ctx.Done():
+		log.Println("Exiting...")
+		os.Exit(0)
+	default:
 	}
 }
