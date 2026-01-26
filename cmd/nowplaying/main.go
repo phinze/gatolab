@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/phinze/gatolab/internal/coordinator"
 	"github.com/phinze/gatolab/internal/module"
@@ -78,16 +79,30 @@ func main() {
 
 	log.Println("Ready! Media on left, weather on right")
 
-	// Wait for shutdown signal or error
+	// Wait for shutdown signal or coordinator exit (device disconnect)
 	select {
 	case <-sigChan:
 		log.Println("\nShutting down...")
-		cancel()
 	case err := <-errChan:
 		if err != nil {
-			log.Printf("Coordinator error: %v", err)
+			log.Printf("Device error: %v", err)
 		}
+		log.Println("Shutting down...")
 	}
 
-	coord.Stop()
+	// Cancel context and stop with timeout
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		coord.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Println("Shutdown complete")
+	case <-time.After(2 * time.Second):
+		log.Println("Shutdown timed out, forcing exit")
+	}
 }

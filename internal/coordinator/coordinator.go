@@ -94,25 +94,28 @@ func (c *Coordinator) Start(ctx context.Context) error {
 	// Setup event handlers
 	c.setupEventHandlers()
 
-	// Start device listener (not in WaitGroup - closed by device.Close())
-	errChan := make(chan error, 1)
+	// Start device listener
+	listenErr := make(chan error, 1)
 	go func() {
-		if err := c.device.Listen(errChan); err != nil {
-			select {
-			case errChan <- err:
-			default:
-			}
+		err := c.device.Listen(nil) // errors logged to stderr
+		if err != nil {
+			listenErr <- err
 		}
+		close(listenErr)
 	}()
 
 	// Start render loop
 	c.wg.Add(1)
 	go c.renderLoop()
 
-	// Wait for context cancellation
-	<-c.ctx.Done()
-
-	return nil
+	// Wait for context cancellation or device disconnect
+	select {
+	case <-c.ctx.Done():
+		return nil
+	case err := <-listenErr:
+		// Device disconnected or listener error
+		return err
+	}
 }
 
 // Stop gracefully shuts down all modules.
