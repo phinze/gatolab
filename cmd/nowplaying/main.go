@@ -12,6 +12,7 @@ import (
 
 	"github.com/phinze/gatolab/internal/coordinator"
 	"github.com/phinze/gatolab/internal/module"
+	"github.com/phinze/gatolab/internal/modules/github"
 	"github.com/phinze/gatolab/internal/modules/homeassistant"
 	"github.com/phinze/gatolab/internal/modules/nowplaying"
 	"github.com/phinze/gatolab/internal/modules/weather"
@@ -134,6 +135,11 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan
 	coord.RegisterModule(ha, module.Resources{
 		Keys:  []module.KeyID{module.Key1, module.Key2},
 		Dials: []module.DialID{module.Dial4},
+	})
+
+	gh := github.New(device)
+	coord.RegisterModule(gh, module.Resources{
+		Keys: []module.KeyID{module.Key3},
 	})
 
 	// Run coordinator with a child context so we can stop it independently
