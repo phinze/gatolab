@@ -12,6 +12,7 @@ import (
 
 	"github.com/phinze/gatolab/internal/coordinator"
 	"github.com/phinze/gatolab/internal/module"
+	"github.com/phinze/gatolab/internal/modules/homeassistant"
 	"github.com/phinze/gatolab/internal/modules/nowplaying"
 	"github.com/phinze/gatolab/internal/modules/weather"
 	"github.com/prashantgupta24/mac-sleep-notifier/notifier"
@@ -127,6 +128,11 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan
 	w := weather.New(device)
 	coord.RegisterModule(w, module.Resources{
 		StripRect: image.Rect(400, 0, 800, 100),
+	})
+
+	ha := homeassistant.New(device)
+	coord.RegisterModule(ha, module.Resources{
+		Keys: []module.KeyID{module.Key1},
 	})
 
 	// Run coordinator with a child context so we can stop it independently

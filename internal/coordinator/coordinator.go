@@ -5,6 +5,7 @@ import (
 	"context"
 	"image"
 	"image/draw"
+	"log"
 	"sync"
 	"time"
 
@@ -23,6 +24,9 @@ type Coordinator struct {
 	// Ownership maps for event routing
 	keyOwners  map[module.KeyID]module.Module
 	dialOwners map[module.DialID]module.Module
+
+	// Track modules that failed to initialize
+	failedModules map[module.Module]bool
 
 	// Strip compositing
 	stripRect image.Rectangle
@@ -44,6 +48,7 @@ func New(device *streamdeck.Device) *Coordinator {
 		moduleResources: make(map[module.Module]module.Resources),
 		keyOwners:       make(map[module.KeyID]module.Module),
 		dialOwners:      make(map[module.DialID]module.Module),
+		failedModules:   make(map[module.Module]bool),
 	}
 }
 
@@ -82,12 +87,12 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		}
 	}
 
-	// Initialize all modules
+	// Initialize all modules (continue on error, just skip failed modules)
 	for _, m := range c.modules {
-		// Find resources for this module
 		res := c.resourcesForModule(m)
 		if err := m.Init(c.ctx, res); err != nil {
-			return err
+			log.Printf("Module %s failed to initialize: %v (skipping)", m.ID(), err)
+			c.failedModules[m] = true
 		}
 	}
 
@@ -145,6 +150,9 @@ func (c *Coordinator) setupEventHandlers() {
 		key := keyID
 		mod := m
 		c.device.AddKeyHandler(key.ToStreamdeck(), func(d *streamdeck.Device, k *streamdeck.Key) error {
+			if c.failedModules[mod] {
+				return nil
+			}
 			// Create press event
 			event := module.KeyEvent{Pressed: true}
 			if err := mod.HandleKey(key, event); err != nil {
@@ -163,6 +171,9 @@ func (c *Coordinator) setupEventHandlers() {
 		dial := dialID
 		mod := m
 		c.device.AddDialRotateHandler(dial.ToStreamdeck(), func(d *streamdeck.Device, di *streamdeck.Dial, delta int8) error {
+			if c.failedModules[mod] {
+				return nil
+			}
 			event := module.DialEvent{
 				Type:  module.DialRotate,
 				Delta: delta,
@@ -176,6 +187,9 @@ func (c *Coordinator) setupEventHandlers() {
 		dial := dialID
 		mod := m
 		c.device.AddDialSwitchHandler(dial.ToStreamdeck(), func(d *streamdeck.Device, di *streamdeck.Dial) error {
+			if c.failedModules[mod] {
+				return nil
+			}
 			// Create press event
 			event := module.DialEvent{Type: module.DialPress}
 			if err := mod.HandleDial(dial, event); err != nil {
@@ -208,6 +222,9 @@ func (c *Coordinator) routeStripEvent(event module.TouchStripEvent) error {
 	// For now, route to first module that has a strip region
 	// Future: check which module's strip rect contains the event point
 	for _, m := range c.modules {
+		if c.failedModules[m] {
+			continue
+		}
 		res := c.resourcesForModule(m)
 		if res.HasStrip() {
 			return m.HandleStripTouch(event)
@@ -241,6 +258,9 @@ func (c *Coordinator) renderLoop() {
 // renderKeys collects key images from all modules and applies them to the device.
 func (c *Coordinator) renderKeys() {
 	for _, m := range c.modules {
+		if c.failedModules[m] {
+			continue
+		}
 		keyImages := m.RenderKeys()
 		for keyID, img := range keyImages {
 			if img != nil {
@@ -261,6 +281,9 @@ func (c *Coordinator) renderStrip() {
 
 	// Collect and composite each module's strip output
 	for _, m := range c.modules {
+		if c.failedModules[m] {
+			continue
+		}
 		res := c.resourcesForModule(m)
 		if !res.HasStrip() {
 			continue
