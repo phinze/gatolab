@@ -120,11 +120,20 @@ func (m *Module) fetchStats(ctx context.Context) {
 		return
 	}
 
-	// Also fetch PR list for overlay
+	// Also fetch PR list for overlay (includes CI status)
 	prList, err := m.client.GetMyPRList(ctx)
 	if err != nil {
 		log.Printf("Failed to fetch GitHub PR list: %v", err)
 		// Continue with stats even if list fails
+	}
+
+	// Count CI failures from PR list
+	if prList != nil {
+		for _, pr := range prList {
+			if pr.CI == CIStatusFailed {
+				stats.CIFailed++
+			}
+		}
 	}
 
 	m.mu.Lock()

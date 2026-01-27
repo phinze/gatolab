@@ -19,8 +19,8 @@ import (
 //go:embed fonts/PublicSans-Bold.ttf
 var fontBold []byte
 
-//go:embed icons/git-pull-request.svg
-var iconPRSVG string
+//go:embed icons/github.svg
+var iconGitHubSVG string
 
 // Common colors
 var (
@@ -29,6 +29,7 @@ var (
 	colorGreen   = color.RGBA{63, 185, 80, 255}  // GitHub green
 	colorYellow  = color.RGBA{210, 153, 34, 255} // GitHub yellow
 	colorOrange  = color.RGBA{219, 109, 40, 255} // GitHub orange
+	colorRed     = color.RGBA{248, 81, 73, 255}  // GitHub red for CI failures
 	colorDimGray = color.RGBA{110, 110, 110, 255}
 )
 
@@ -98,18 +99,26 @@ func (m *Module) renderPRStatsButton() image.Image {
 	// Background
 	draw.Draw(img, img.Bounds(), &image.Uniform{colorKeyBg}, image.Point{}, draw.Src)
 
-	// Draw small PR icon at top
-	iconImg := renderSVGIcon(iconPRSVG, 20, colorWhite)
-	iconX := (keySize - 20) / 2
-	draw.Draw(img, image.Rect(iconX, 4, iconX+20, 24), iconImg, image.Point{}, draw.Over)
+	var rowY int
+	if stats.CIFailed > 0 {
+		// Show fail row at top instead of icon
+		m.drawStatRow(img, 14, "Fail", stats.CIFailed, colorRed)
+		rowY = 28
+	} else {
+		// Draw GitHub logo at top
+		iconImg := renderSVGIcon(iconGitHubSVG, 20, colorWhite)
+		iconX := (keySize - 20) / 2
+		draw.Draw(img, image.Rect(iconX, 4, iconX+20, 24), iconImg, image.Point{}, draw.Over)
+		rowY = 28
+	}
 
 	// Draw stats as colored rows
 	// Waiting (yellow)
-	m.drawStatRow(img, 28, "Wait", stats.WaitingForReview, colorYellow)
+	m.drawStatRow(img, rowY, "Wait", stats.WaitingForReview, colorYellow)
 	// Approved (green)
-	m.drawStatRow(img, 42, "OK", stats.Approved, colorGreen)
+	m.drawStatRow(img, rowY+14, "OK", stats.Approved, colorGreen)
 	// Changes requested (orange)
-	m.drawStatRow(img, 56, "Chg", stats.ChangesRequested, colorOrange)
+	m.drawStatRow(img, rowY+28, "Chg", stats.ChangesRequested, colorOrange)
 
 	return img
 }
@@ -185,19 +194,21 @@ func renderSVGIcon(svgContent string, size int, iconColor color.Color) image.Ima
 func (m *Module) renderPRKey(pr PRInfo) image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, keySize, keySize))
 
-	// Background color based on status
+	// Background color based on status (darken if CI failed)
 	var bgColor color.Color
-	switch pr.Status {
-	case PRStatusApproved:
+	switch {
+	case pr.CI == CIStatusFailed:
+		bgColor = color.RGBA{60, 30, 30, 255} // Dark red for CI failure
+	case pr.Status == PRStatusApproved:
 		bgColor = color.RGBA{30, 60, 40, 255} // Dark green
-	case PRStatusChanges:
+	case pr.Status == PRStatusChanges:
 		bgColor = color.RGBA{60, 40, 30, 255} // Dark orange
 	default:
 		bgColor = color.RGBA{50, 50, 40, 255} // Dark yellow
 	}
 	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
 
-	// Status indicator color
+	// Status indicator color (review status)
 	var statusColor color.Color
 	switch pr.Status {
 	case PRStatusApproved:
@@ -208,13 +219,24 @@ func (m *Module) renderPRKey(pr PRInfo) image.Image {
 		statusColor = colorYellow
 	}
 
-	// Draw status indicator bar at top
+	// Draw status indicator bar at top (red if CI failed)
+	barColor := statusColor
+	if pr.CI == CIStatusFailed {
+		barColor = colorRed
+	}
 	barRect := image.Rect(0, 0, keySize, 4)
-	draw.Draw(img, barRect, &image.Uniform{statusColor}, image.Point{}, draw.Src)
+	draw.Draw(img, barRect, &image.Uniform{barColor}, image.Point{}, draw.Src)
 
 	// Draw PR number
 	prNum := fmt.Sprintf("#%d", pr.Number)
 	m.drawText(img, prNum, 4, 16, m.labelFace, statusColor)
+
+	// Draw CI indicator next to PR number
+	if pr.CI == CIStatusFailed {
+		m.drawText(img, "X", 40, 16, m.labelFace, colorRed)
+	} else if pr.CI == CIStatusPassed {
+		m.drawText(img, "+", 40, 16, m.labelFace, colorGreen)
+	}
 
 	// Draw repo name (truncated)
 	repo := pr.Repo
@@ -279,7 +301,7 @@ func (m *Module) renderOverlayStrip() image.Image {
 
 // drawStripPR draws a single PR entry on the strip.
 func (m *Module) drawStripPR(img *image.RGBA, pr PRInfo, x int) {
-	// Status color
+	// Status color (review status)
 	var statusColor color.Color
 	switch pr.Status {
 	case PRStatusApproved:
@@ -290,9 +312,13 @@ func (m *Module) drawStripPR(img *image.RGBA, pr PRInfo, x int) {
 		statusColor = colorYellow
 	}
 
-	// Draw status bar on left edge
+	// Draw status bar on left edge (red if CI failed)
+	barColor := statusColor
+	if pr.CI == CIStatusFailed {
+		barColor = colorRed
+	}
 	barRect := image.Rect(x+4, 15, x+8, 85)
-	draw.Draw(img, barRect, &image.Uniform{statusColor}, image.Point{}, draw.Src)
+	draw.Draw(img, barRect, &image.Uniform{barColor}, image.Point{}, draw.Src)
 
 	// Draw repo/number (14px)
 	repo := pr.Repo
@@ -304,6 +330,14 @@ func (m *Module) drawStripPR(img *image.RGBA, pr PRInfo, x int) {
 	}
 	label := fmt.Sprintf("%s #%d", repo, pr.Number)
 	m.drawText(img, label, x+16, 35, m.stripLabelFace, statusColor)
+
+	// Draw CI indicator
+	ciIndicatorX := x + 16 + font.MeasureString(m.stripLabelFace, label).Ceil() + 5
+	if pr.CI == CIStatusFailed {
+		m.drawText(img, "X", ciIndicatorX, 35, m.stripLabelFace, colorRed)
+	} else if pr.CI == CIStatusPassed {
+		m.drawText(img, "+", ciIndicatorX, 35, m.stripLabelFace, colorGreen)
+	}
 
 	// Draw title (18px, truncated)
 	title := pr.Title
