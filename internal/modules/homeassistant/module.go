@@ -17,9 +17,10 @@ import (
 
 // Config holds the Home Assistant module configuration.
 type Config struct {
-	URL             string
-	Token           string
-	RingLightEntity string
+	URL              string
+	Token            string
+	RingLightEntity  string
+	OfficeLightEntity string
 }
 
 // Module implements the Home Assistant control module.
@@ -32,8 +33,9 @@ type Module struct {
 	enabled bool
 
 	// State
-	mu             sync.RWMutex
-	ringLightState LightState
+	mu               sync.RWMutex
+	ringLightState   LightState
+	officeLightState LightState
 
 	// Fonts
 	labelFace font.Face
@@ -93,6 +95,7 @@ func (m *Module) Init(ctx context.Context, res module.Resources) error {
 func (m *Module) pollState(ctx context.Context) {
 	// Initial fetch
 	m.fetchRingLightState(ctx)
+	m.fetchOfficeLightState(ctx)
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -103,6 +106,7 @@ func (m *Module) pollState(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.fetchRingLightState(ctx)
+			m.fetchOfficeLightState(ctx)
 		}
 	}
 }
@@ -127,6 +131,26 @@ func (m *Module) getRingLightState() LightState {
 	return m.ringLightState
 }
 
+// fetchOfficeLightState fetches the current office light state.
+func (m *Module) fetchOfficeLightState(ctx context.Context) {
+	state, err := m.client.GetLightState(ctx, m.config.OfficeLightEntity)
+	if err != nil {
+		log.Printf("Failed to fetch office light state: %v", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.officeLightState = state
+	m.mu.Unlock()
+}
+
+// getOfficeLightState returns the current office light state.
+func (m *Module) getOfficeLightState() LightState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.officeLightState
+}
+
 // Stop shuts down the module.
 func (m *Module) Stop() error {
 	return m.BaseModule.Stop()
@@ -149,10 +173,17 @@ func loadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("HASS_RING_LIGHT_ENTITY environment variable not set")
 	}
 
+	// Office light defaults to signe_gradient_floor_1 if not set
+	officeLightEntity := os.Getenv("HASS_OFFICE_LIGHT_ENTITY")
+	if officeLightEntity == "" {
+		officeLightEntity = "light.signe_gradient_floor_1"
+	}
+
 	return Config{
-		URL:             url,
-		Token:           token,
-		RingLightEntity: ringLightEntity,
+		URL:               url,
+		Token:             token,
+		RingLightEntity:   ringLightEntity,
+		OfficeLightEntity: officeLightEntity,
 	}, nil
 }
 
@@ -193,9 +224,9 @@ func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
 		return nil
 	}
 
-	// Key 0: Office Time button
+	// Key 0: Office toggle button
 	if len(m.resources.Keys) > 0 && id == m.resources.Keys[0] {
-		return m.executeOfficeTime()
+		return m.toggleOfficeMode()
 	}
 
 	// Key 1: Ring Light toggle
@@ -206,19 +237,34 @@ func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
 	return nil
 }
 
-// executeOfficeTime runs the Office Time script.
-func (m *Module) executeOfficeTime() error {
-	log.Println("Executing Office Time script...")
+// toggleOfficeMode toggles between office time and quittin time based on office light state.
+func (m *Module) toggleOfficeMode() error {
+	state := m.getOfficeLightState()
 
-	err := m.client.CallService(context.Background(), "script", "turn_on", map[string]any{
-		"entity_id": "script.office_time",
-	})
-	if err != nil {
-		log.Printf("Failed to execute Office Time: %v", err)
-		return err
+	if state.On {
+		// Light is on, run quittin time to turn off
+		log.Println("Executing Quittin Time script...")
+		err := m.client.CallService(context.Background(), "script", "turn_on", map[string]any{
+			"entity_id": "script.quittin_time",
+		})
+		if err != nil {
+			log.Printf("Failed to execute Quittin Time: %v", err)
+			return err
+		}
+		log.Println("Quittin Time script executed successfully")
+	} else {
+		// Light is off, run office time to turn on
+		log.Println("Executing Office Time script...")
+		err := m.client.CallService(context.Background(), "script", "turn_on", map[string]any{
+			"entity_id": "script.office_time",
+		})
+		if err != nil {
+			log.Printf("Failed to execute Office Time: %v", err)
+			return err
+		}
+		log.Println("Office Time script executed successfully")
 	}
 
-	log.Println("Office Time script executed successfully")
 	return nil
 }
 
