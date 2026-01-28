@@ -11,12 +11,17 @@ import (
 	"time"
 )
 
-// PRStats holds counts of PRs in different states.
+// PRStats holds counts of PRs in different states (for authored PRs).
 type PRStats struct {
 	WaitingForReview int
 	Approved         int
 	ChangesRequested int
 	CIFailed         int
+}
+
+// ReviewStats holds the count of PRs awaiting my review.
+type ReviewStats struct {
+	Total int
 }
 
 // PRStatus represents the review status of a PR.
@@ -453,4 +458,45 @@ func (c *Client) getPRHeadSHA(ctx context.Context, repo string, number int) stri
 	}
 
 	return pr.Head.SHA
+}
+
+// GetReviewRequestedStats fetches the count of PRs awaiting my review.
+func (c *Client) GetReviewRequestedStats(ctx context.Context) (ReviewStats, error) {
+	var stats ReviewStats
+
+	username, err := c.getAuthenticatedUser(ctx)
+	if err != nil {
+		return stats, fmt.Errorf("failed to get username: %w", err)
+	}
+
+	// Query: is:open is:pr review-requested:{user} archived:false
+	query := fmt.Sprintf("is:open is:pr review-requested:%s archived:false", username)
+	count, err := c.searchPRCount(ctx, query)
+	if err != nil {
+		return stats, err
+	}
+
+	stats.Total = count
+	return stats, nil
+}
+
+// GetReviewRequestedPRList fetches PRs awaiting my review with details.
+func (c *Client) GetReviewRequestedPRList(ctx context.Context) ([]PRInfo, error) {
+	username, err := c.getAuthenticatedUser(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get username: %w", err)
+	}
+
+	// Query: is:open is:pr review-requested:{user} archived:false
+	query := fmt.Sprintf("is:open is:pr review-requested:%s archived:false", username)
+	prs, err := c.searchPRs(ctx, query, PRStatusWaiting)
+	if err != nil {
+		return nil, err
+	}
+
+	// For review-requested PRs, the status is always "waiting" (for my review)
+	// Fetch CI statuses
+	c.fetchCIStatuses(ctx, prs)
+
+	return prs, nil
 }

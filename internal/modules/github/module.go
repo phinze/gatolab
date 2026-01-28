@@ -14,6 +14,15 @@ import (
 	"rafaelmartins.com/p/streamdeck"
 )
 
+// OverlayType indicates which overlay is currently active.
+type OverlayType int
+
+const (
+	OverlayNone OverlayType = iota
+	OverlayMyPRs
+	OverlayReviewRequested
+)
+
 // Module implements the GitHub PR stats module.
 type Module struct {
 	module.BaseModule
@@ -22,13 +31,17 @@ type Module struct {
 	client  *Client
 	enabled bool
 
-	// State
+	// State for my PRs (Key3)
 	mu     sync.RWMutex
 	stats  PRStats
 	prList []PRInfo
 
+	// State for review-requested PRs (Key4)
+	reviewStats  ReviewStats
+	reviewPRList []PRInfo
+
 	// Overlay state
-	overlayActive bool
+	overlayType   OverlayType
 	overlayExpiry time.Time
 
 	// Fonts
@@ -113,8 +126,9 @@ func (m *Module) pollStats(ctx context.Context) {
 	}
 }
 
-// fetchStats fetches the current PR stats.
+// fetchStats fetches the current PR stats for both my PRs and review-requested PRs.
 func (m *Module) fetchStats(ctx context.Context) {
+	// Fetch my PR stats
 	stats, err := m.client.GetMyPRStats(ctx)
 	if err != nil {
 		log.Printf("Failed to fetch GitHub PR stats: %v", err)
@@ -129,18 +143,34 @@ func (m *Module) fetchStats(ctx context.Context) {
 	}
 
 	// Count CI failures from PR list
-	if prList != nil {
-		for _, pr := range prList {
-			if pr.CI == CIStatusFailed {
-				stats.CIFailed++
-			}
+	for _, pr := range prList {
+		if pr.CI == CIStatusFailed {
+			stats.CIFailed++
 		}
+	}
+
+	// Fetch review-requested stats
+	reviewStats, err := m.client.GetReviewRequestedStats(ctx)
+	if err != nil {
+		log.Printf("Failed to fetch review-requested stats: %v", err)
+		// Continue with partial data
+	}
+
+	// Fetch review-requested PR list
+	reviewPRList, err := m.client.GetReviewRequestedPRList(ctx)
+	if err != nil {
+		log.Printf("Failed to fetch review-requested PR list: %v", err)
+		// Continue with partial data
 	}
 
 	m.mu.Lock()
 	m.stats = stats
 	if prList != nil {
 		m.prList = prList
+	}
+	m.reviewStats = reviewStats
+	if reviewPRList != nil {
+		m.reviewPRList = reviewPRList
 	}
 	m.mu.Unlock()
 }
@@ -159,6 +189,20 @@ func (m *Module) getPRList() []PRInfo {
 	return m.prList
 }
 
+// getReviewStats returns the current review-requested stats.
+func (m *Module) getReviewStats() ReviewStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.reviewStats
+}
+
+// getReviewPRList returns the current review-requested PR list.
+func (m *Module) getReviewPRList() []PRInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.reviewPRList
+}
+
 // RenderKeys returns images for the module's keys.
 func (m *Module) RenderKeys() map[module.KeyID]image.Image {
 	if !m.enabled {
@@ -167,9 +211,14 @@ func (m *Module) RenderKeys() map[module.KeyID]image.Image {
 
 	keys := make(map[module.KeyID]image.Image)
 
-	// Key 0: PR stats overview
+	// Key 0 (Key3): My PR stats overview (outbox)
 	if len(m.resources.Keys) > 0 {
 		keys[m.resources.Keys[0]] = m.renderPRStatsButton()
+	}
+
+	// Key 1 (Key4): Review-requested PRs (inbox)
+	if len(m.resources.Keys) > 1 {
+		keys[m.resources.Keys[1]] = m.renderReviewRequestedButton()
 	}
 
 	return keys
@@ -187,9 +236,15 @@ func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
 		return nil
 	}
 
-	// Show overlay for 5 seconds
+	// Determine which overlay to show based on which key was pressed
 	m.mu.Lock()
-	m.overlayActive = true
+	if len(m.resources.Keys) > 1 && id == m.resources.Keys[1] {
+		// Key4 pressed - show review-requested overlay
+		m.overlayType = OverlayReviewRequested
+	} else {
+		// Key3 pressed - show my PRs overlay
+		m.overlayType = OverlayMyPRs
+	}
 	m.overlayExpiry = time.Now().Add(5 * time.Second)
 	m.mu.Unlock()
 
@@ -216,13 +271,24 @@ func (m *Module) HandleOverlayKey(id module.KeyID, event module.KeyEvent) error 
 	// Key8 (bottom right) dismisses overlay
 	if id == module.Key8 {
 		m.mu.Lock()
-		m.overlayActive = false
+		m.overlayType = OverlayNone
 		m.mu.Unlock()
 		return nil
 	}
 
+	// Get the appropriate PR list based on overlay type
+	m.mu.RLock()
+	overlayType := m.overlayType
+	m.mu.RUnlock()
+
+	var prList []PRInfo
+	if overlayType == OverlayReviewRequested {
+		prList = m.getReviewPRList()
+	} else {
+		prList = m.getPRList()
+	}
+
 	// Map key to PR index (Key1-Key7 map to PRs 0-6)
-	prList := m.getPRList()
 	keyIndex := int(id) - 1 // Key1=1, so subtract 1 for 0-indexed
 	if keyIndex >= 0 && keyIndex < len(prList) {
 		pr := prList[keyIndex]
@@ -241,7 +307,18 @@ func (m *Module) HandleOverlayStripTouch(event module.TouchStripEvent) error {
 		return nil
 	}
 
-	prList := m.getPRList()
+	// Get the appropriate PR list based on overlay type
+	m.mu.RLock()
+	overlayType := m.overlayType
+	m.mu.RUnlock()
+
+	var prList []PRInfo
+	if overlayType == OverlayReviewRequested {
+		prList = m.getReviewPRList()
+	} else {
+		prList = m.getPRList()
+	}
+
 	if len(prList) == 0 {
 		return nil
 	}
@@ -271,7 +348,7 @@ func (m *Module) IsOverlayActive() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if !m.overlayActive {
+	if m.overlayType == OverlayNone {
 		return false
 	}
 
@@ -280,7 +357,7 @@ func (m *Module) IsOverlayActive() bool {
 		// Need to acquire write lock to update
 		m.mu.RUnlock()
 		m.mu.Lock()
-		m.overlayActive = false
+		m.overlayType = OverlayNone
 		m.mu.Unlock()
 		m.mu.RLock()
 		return false
@@ -292,7 +369,18 @@ func (m *Module) IsOverlayActive() bool {
 // RenderOverlayKeys returns images for all 8 keys showing PR list.
 func (m *Module) RenderOverlayKeys() map[module.KeyID]image.Image {
 	keys := make(map[module.KeyID]image.Image)
-	prList := m.getPRList()
+
+	// Get the appropriate PR list based on overlay type
+	m.mu.RLock()
+	overlayType := m.overlayType
+	m.mu.RUnlock()
+
+	var prList []PRInfo
+	if overlayType == OverlayReviewRequested {
+		prList = m.getReviewPRList()
+	} else {
+		prList = m.getPRList()
+	}
 
 	// Render up to 7 PRs on Keys 1-7, Key8 is the back button
 	prKeys := []module.KeyID{
@@ -316,5 +404,17 @@ func (m *Module) RenderOverlayKeys() map[module.KeyID]image.Image {
 
 // RenderOverlayStrip returns the touch strip image for the overlay.
 func (m *Module) RenderOverlayStrip() image.Image {
-	return m.renderOverlayStrip()
+	// Get the appropriate PR list based on overlay type
+	m.mu.RLock()
+	overlayType := m.overlayType
+	m.mu.RUnlock()
+
+	var prList []PRInfo
+	if overlayType == OverlayReviewRequested {
+		prList = m.getReviewPRList()
+	} else {
+		prList = m.getPRList()
+	}
+
+	return m.renderOverlayStripWithPRs(prList)
 }

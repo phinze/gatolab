@@ -22,6 +22,12 @@ var fontBold []byte
 //go:embed icons/github.svg
 var iconGitHubSVG string
 
+//go:embed icons/send.svg
+var iconSendSVG string
+
+//go:embed icons/inbox.svg
+var iconInboxSVG string
+
 // Common colors
 var (
 	colorKeyBg   = color.RGBA{40, 40, 40, 255}
@@ -90,7 +96,7 @@ func (m *Module) initFonts() error {
 	return nil
 }
 
-// renderPRStatsButton renders the PR stats button.
+// renderPRStatsButton renders the PR stats button (my PRs - outbox).
 func (m *Module) renderPRStatsButton() image.Image {
 	stats := m.getStats()
 
@@ -105,8 +111,8 @@ func (m *Module) renderPRStatsButton() image.Image {
 		m.drawStatRow(img, 14, "Fail", stats.CIFailed, colorRed)
 		rowY = 28
 	} else {
-		// Draw GitHub logo at top
-		iconImg := renderSVGIcon(iconGitHubSVG, 20, colorWhite)
+		// Draw send icon (outbox) at top
+		iconImg := renderSVGIcon(iconSendSVG, 20, colorWhite)
 		iconX := (keySize - 20) / 2
 		draw.Draw(img, image.Rect(iconX, 4, iconX+20, 24), iconImg, image.Point{}, draw.Over)
 		rowY = 28
@@ -119,6 +125,30 @@ func (m *Module) renderPRStatsButton() image.Image {
 	m.drawStatRow(img, rowY+14, "OK", stats.Approved, colorGreen)
 	// Changes requested (orange)
 	m.drawStatRow(img, rowY+28, "Chg", stats.ChangesRequested, colorOrange)
+
+	return img
+}
+
+// renderReviewRequestedButton renders the review-requested PRs button (inbox).
+func (m *Module) renderReviewRequestedButton() image.Image {
+	stats := m.getReviewStats()
+
+	img := image.NewRGBA(image.Rect(0, 0, keySize, keySize))
+
+	// Background
+	draw.Draw(img, img.Bounds(), &image.Uniform{colorKeyBg}, image.Point{}, draw.Src)
+
+	// Draw inbox icon at top
+	iconImg := renderSVGIcon(iconInboxSVG, 24, colorWhite)
+	iconX := (keySize - 24) / 2
+	draw.Draw(img, image.Rect(iconX, 8, iconX+24, 32), iconImg, image.Point{}, draw.Over)
+
+	// Draw "Review" label
+	m.drawTextCentered(img, "Review", keySize/2, 48, m.labelFace, colorDimGray)
+
+	// Draw count
+	countStr := fmt.Sprintf("%d", stats.Total)
+	m.drawTextCentered(img, countStr, keySize/2, 64, m.numberFace, colorYellow)
 
 	return img
 }
@@ -282,16 +312,15 @@ func (m *Module) renderBackKey() image.Image {
 	return img
 }
 
-// renderOverlayStrip renders the touch strip for the PR overlay.
-func (m *Module) renderOverlayStrip() image.Image {
+// renderOverlayStripWithPRs renders the touch strip for the PR overlay with the given PR list.
+func (m *Module) renderOverlayStripWithPRs(prList []PRInfo) image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, 800, 100))
 
 	// Dark background
 	draw.Draw(img, img.Bounds(), &image.Uniform{color.RGBA{30, 30, 30, 255}}, image.Point{}, draw.Src)
 
-	prList := m.getPRList()
 	if len(prList) == 0 {
-		m.drawTextCentered(img, "No open PRs", 400, 55, m.stripTitleFace, colorDimGray)
+		m.drawTextCentered(img, "No PRs", 400, 55, m.stripTitleFace, colorDimGray)
 		return img
 	}
 

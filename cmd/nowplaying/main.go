@@ -149,7 +149,7 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan
 
 	gh := github.New(device)
 	coord.RegisterModule(gh, module.Resources{
-		Keys: []module.KeyID{module.Key3},
+		Keys: []module.KeyID{module.Key3, module.Key4},
 	})
 
 	// Run coordinator with a child context so we can stop it independently
