@@ -57,6 +57,7 @@ type PRInfo struct {
 type Client struct {
 	token      string
 	httpClient *http.Client
+	username   string // cached username
 }
 
 // NewClient creates a new GitHub API client using the gh CLI token.
@@ -138,8 +139,13 @@ func (c *Client) GetMyPRStats(ctx context.Context) (PRStats, error) {
 	return stats, nil
 }
 
-// getAuthenticatedUser returns the authenticated user's login.
+// getAuthenticatedUser returns the authenticated user's login (cached after first call).
 func (c *Client) getAuthenticatedUser(ctx context.Context) (string, error) {
+	// Return cached username if available
+	if c.username != "" {
+		return c.username, nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user", nil)
 	if err != nil {
 		return "", err
@@ -165,7 +171,9 @@ func (c *Client) getAuthenticatedUser(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	return user.Login, nil
+	// Cache the username
+	c.username = user.Login
+	return c.username, nil
 }
 
 // searchPRCount searches for PRs matching a query and returns the count.
