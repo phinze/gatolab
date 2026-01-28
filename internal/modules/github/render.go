@@ -271,6 +271,17 @@ func (m *Module) renderEmptyKey() image.Image {
 	return img
 }
 
+// renderBackKey renders the back button for dismissing the overlay.
+func (m *Module) renderBackKey() image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, keySize, keySize))
+	draw.Draw(img, img.Bounds(), &image.Uniform{colorKeyBg}, image.Point{}, draw.Src)
+
+	// Draw "Back" label centered
+	m.drawTextCentered(img, "Back", keySize/2, keySize/2+4, m.overlayFace, colorDimGray)
+
+	return img
+}
+
 // renderOverlayStrip renders the touch strip for the PR overlay.
 func (m *Module) renderOverlayStrip() image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, 800, 100))

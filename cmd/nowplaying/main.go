@@ -82,13 +82,18 @@ func main() {
 // Uses polling since macOS doesn't have a simple USB hotplug event API.
 func waitForDevice(ctx context.Context) *streamdeck.Device {
 	// First, try to get an already-connected device
-	if device, err := streamdeck.GetDevice(""); err == nil {
-		if err := device.Open(); err == nil {
+	device, err := streamdeck.GetDevice("")
+	if err != nil {
+		log.Printf("GetDevice error: %v", err)
+	} else {
+		if err := device.Open(); err != nil {
+			log.Printf("Device found but Open failed: %v", err)
+		} else {
 			return device
 		}
 	}
 
-	log.Println("No device found, waiting...")
+	log.Println("Waiting for device...")
 
 	for {
 		select {
@@ -97,12 +102,17 @@ func waitForDevice(ctx context.Context) *streamdeck.Device {
 		case <-time.After(2 * time.Second):
 		}
 
-		if device, err := streamdeck.GetDevice(""); err == nil {
-			if err := device.Open(); err == nil {
-				log.Println("Device connected!")
-				return device
-			}
+		device, err := streamdeck.GetDevice("")
+		if err != nil {
+			// Only log occasionally to avoid spam
+			continue
 		}
+		if err := device.Open(); err != nil {
+			log.Printf("Device found but Open failed: %v", err)
+			continue
+		}
+		log.Println("Device connected!")
+		return device
 	}
 }
 
@@ -180,8 +190,13 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan
 		log.Println("Cleanup timed out")
 	}
 
-	// Close device in background - don't block on it
-	go device.Close()
+	// Close device - need to wait for this on wake to avoid race condition
+	// where we try to reopen before close completes
+	closeDone := make(chan struct{})
+	go func() {
+		device.Close()
+		close(closeDone)
+	}()
 
 	// If parent context is cancelled (shutdown signal), force exit
 	// since device.Close() may block indefinitely
@@ -189,6 +204,11 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan
 	case <-ctx.Done():
 		log.Println("Exiting...")
 		os.Exit(0)
-	default:
+	case <-closeDone:
+		// Device closed cleanly
+	case <-time.After(3 * time.Second):
+		// Device close timed out - on wake, give it a bit more time
+		// then proceed anyway (might need to wait for device to reappear)
+		log.Println("Device close timed out")
 	}
 }

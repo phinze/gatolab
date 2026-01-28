@@ -146,26 +146,57 @@ func (c *Coordinator) resourcesForModule(m module.Module) module.Resources {
 	return c.moduleResources[m]
 }
 
+// getActiveOverlay returns the active overlay provider, if any.
+func (c *Coordinator) getActiveOverlay() module.OverlayProvider {
+	for _, m := range c.modules {
+		if c.failedModules[m] {
+			continue
+		}
+		if overlay, ok := m.(module.OverlayProvider); ok && overlay.IsOverlayActive() {
+			return overlay
+		}
+	}
+	return nil
+}
+
 // setupEventHandlers registers device event handlers that route to modules.
 func (c *Coordinator) setupEventHandlers() {
-	// Key handlers
-	for keyID, m := range c.keyOwners {
+	// Key handlers - register for ALL keys, not just owned ones
+	allKeys := []module.KeyID{
+		module.Key1, module.Key2, module.Key3, module.Key4,
+		module.Key5, module.Key6, module.Key7, module.Key8,
+	}
+
+	for _, keyID := range allKeys {
 		key := keyID
-		mod := m
+		owner := c.keyOwners[key] // may be nil for unowned keys
 		c.device.AddKeyHandler(key.ToStreamdeck(), func(d *streamdeck.Device, k *streamdeck.Key) error {
-			if c.failedModules[mod] {
+			// Check for active overlay first
+			if overlay := c.getActiveOverlay(); overlay != nil {
+				// Route to overlay handler
+				event := module.KeyEvent{Pressed: true}
+				if err := overlay.HandleOverlayKey(key, event); err != nil {
+					return err
+				}
+				duration := k.WaitForRelease()
+				event = module.KeyEvent{Pressed: false, Duration: duration}
+				return overlay.HandleOverlayKey(key, event)
+			}
+
+			// No overlay - route to owner if exists
+			if owner == nil || c.failedModules[owner] {
 				return nil
 			}
 			// Create press event
 			event := module.KeyEvent{Pressed: true}
-			if err := mod.HandleKey(key, event); err != nil {
+			if err := owner.HandleKey(key, event); err != nil {
 				return err
 			}
 
 			// Wait for release and create release event
 			duration := k.WaitForRelease()
 			event = module.KeyEvent{Pressed: false, Duration: duration}
-			return mod.HandleKey(key, event)
+			return owner.HandleKey(key, event)
 		})
 	}
 
@@ -210,11 +241,19 @@ func (c *Coordinator) setupEventHandlers() {
 	if c.device.GetTouchStripSupported() {
 		c.device.AddTouchStripTouchHandler(func(d *streamdeck.Device, touchType streamdeck.TouchStripTouchType, point image.Point) error {
 			event := module.TouchStripEventFromTap(touchType, point)
+			// Check for active overlay first
+			if overlay := c.getActiveOverlay(); overlay != nil {
+				return overlay.HandleOverlayStripTouch(event)
+			}
 			return c.routeStripEvent(event)
 		})
 
 		c.device.AddTouchStripSwipeHandler(func(d *streamdeck.Device, origin, dest image.Point) error {
 			event := module.TouchStripEventFromSwipe(origin, dest)
+			// Check for active overlay first
+			if overlay := c.getActiveOverlay(); overlay != nil {
+				return overlay.HandleOverlayStripTouch(event)
+			}
 			return c.routeStripEvent(event)
 		})
 	}

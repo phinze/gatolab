@@ -5,6 +5,7 @@ import (
 	"context"
 	"image"
 	"log"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -205,6 +206,66 @@ func (m *Module) HandleStripTouch(event module.TouchStripEvent) error {
 	return nil
 }
 
+// HandleOverlayKey processes key events when the overlay is active.
+func (m *Module) HandleOverlayKey(id module.KeyID, event module.KeyEvent) error {
+	// Only trigger on press (not release)
+	if !event.Pressed {
+		return nil
+	}
+
+	// Key8 (bottom right) dismisses overlay
+	if id == module.Key8 {
+		m.mu.Lock()
+		m.overlayActive = false
+		m.mu.Unlock()
+		return nil
+	}
+
+	// Map key to PR index (Key1-Key7 map to PRs 0-6)
+	prList := m.getPRList()
+	keyIndex := int(id) - 1 // Key1=1, so subtract 1 for 0-indexed
+	if keyIndex >= 0 && keyIndex < len(prList) {
+		pr := prList[keyIndex]
+		if pr.URL != "" {
+			m.openURL(pr.URL)
+		}
+	}
+
+	return nil
+}
+
+// HandleOverlayStripTouch processes touch strip events when the overlay is active.
+func (m *Module) HandleOverlayStripTouch(event module.TouchStripEvent) error {
+	// Only handle taps (short or long)
+	if event.Type != module.TouchTap && event.Type != module.TouchLongTap {
+		return nil
+	}
+
+	prList := m.getPRList()
+	if len(prList) == 0 {
+		return nil
+	}
+
+	// Strip is 800px wide, divided into 4 sections of 200px each
+	const prWidth = 200
+	prIndex := event.Point.X / prWidth
+	if prIndex >= 0 && prIndex < len(prList) && prIndex < 4 {
+		pr := prList[prIndex]
+		if pr.URL != "" {
+			m.openURL(pr.URL)
+		}
+	}
+
+	return nil
+}
+
+// openURL opens a URL in the default browser.
+func (m *Module) openURL(url string) {
+	if err := exec.Command("open", url).Start(); err != nil {
+		log.Printf("Failed to open URL %s: %v", url, err)
+	}
+}
+
 // IsOverlayActive returns true if the PR list overlay is visible.
 func (m *Module) IsOverlayActive() bool {
 	m.mu.RLock()
@@ -233,19 +294,22 @@ func (m *Module) RenderOverlayKeys() map[module.KeyID]image.Image {
 	keys := make(map[module.KeyID]image.Image)
 	prList := m.getPRList()
 
-	// Render up to 8 PRs across all keys
-	allKeys := []module.KeyID{
+	// Render up to 7 PRs on Keys 1-7, Key8 is the back button
+	prKeys := []module.KeyID{
 		module.Key1, module.Key2, module.Key3, module.Key4,
-		module.Key5, module.Key6, module.Key7, module.Key8,
+		module.Key5, module.Key6, module.Key7,
 	}
 
-	for i, keyID := range allKeys {
+	for i, keyID := range prKeys {
 		if i < len(prList) {
 			keys[keyID] = m.renderPRKey(prList[i])
 		} else {
 			keys[keyID] = m.renderEmptyKey()
 		}
 	}
+
+	// Key8 is the back button
+	keys[module.Key8] = m.renderBackKey()
 
 	return keys
 }

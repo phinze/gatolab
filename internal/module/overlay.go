@@ -14,4 +14,11 @@ type OverlayProvider interface {
 
 	// RenderOverlayStrip returns the full touch strip image when the overlay is active.
 	RenderOverlayStrip() image.Image
+
+	// HandleOverlayKey processes key events when the overlay is active.
+	// This allows the overlay to respond to any key press, not just owned keys.
+	HandleOverlayKey(id KeyID, event KeyEvent) error
+
+	// HandleOverlayStripTouch processes touch strip events when the overlay is active.
+	HandleOverlayStripTouch(event TouchStripEvent) error
 }
