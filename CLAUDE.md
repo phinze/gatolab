@@ -9,14 +9,14 @@ See [ROADMAP.md](ROADMAP.md) for detailed architecture plans and feature backlog
 ```
 cmd/
   demo/        - Basic Stream Deck Plus demo
-  nowplaying/  - Media controls module (current main app)
+  belowdeck/   - Main application
 ```
 
 ## Running
 
 ```bash
-# Build and run now-playing
-go build -o ./bin/nowplaying ./cmd/nowplaying && ./bin/nowplaying
+# Build and run
+go build -o ./bin/belowdeck ./cmd/belowdeck && ./bin/belowdeck
 ```
 
 ## Hardware

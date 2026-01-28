@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/phinze/gatolab/internal/module"
+	"github.com/phinze/belowdeck/internal/module"
 	"rafaelmartins.com/p/streamdeck"
 )
 

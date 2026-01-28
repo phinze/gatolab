@@ -10,12 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/phinze/gatolab/internal/coordinator"
-	"github.com/phinze/gatolab/internal/module"
-	"github.com/phinze/gatolab/internal/modules/github"
-	"github.com/phinze/gatolab/internal/modules/homeassistant"
-	"github.com/phinze/gatolab/internal/modules/nowplaying"
-	"github.com/phinze/gatolab/internal/modules/weather"
+	"github.com/phinze/belowdeck/internal/coordinator"
+	"github.com/phinze/belowdeck/internal/module"
+	"github.com/phinze/belowdeck/internal/modules/github"
+	"github.com/phinze/belowdeck/internal/modules/homeassistant"
+	"github.com/phinze/belowdeck/internal/modules/nowplaying"
+	"github.com/phinze/belowdeck/internal/modules/weather"
 	"github.com/prashantgupta24/mac-sleep-notifier/notifier"
 	"rafaelmartins.com/p/streamdeck"
 )

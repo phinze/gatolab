@@ -1,4 +1,4 @@
-module github.com/phinze/gatolab
+module github.com/phinze/belowdeck
 
 go 1.25.5
 

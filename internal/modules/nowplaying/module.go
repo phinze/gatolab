@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/phinze/gatolab/internal/module"
+	"github.com/phinze/belowdeck/internal/module"
 	"golang.org/x/image/font"
 	"rafaelmartins.com/p/streamdeck"
 )

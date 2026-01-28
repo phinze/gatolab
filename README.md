@@ -1,4 +1,4 @@
-# gatolab
+# belowdeck
 
 A modular Stream Deck Plus application for macOS, currently tailored to my personal setup. The architecture is designed to be extensible, and I may generalize it into a configurable tool in the future.
 
@@ -35,7 +35,7 @@ See `.env.local.example` for required variables and where to obtain API keys.
 ### Running
 
 ```bash
-go build -o ./bin/nowplaying ./cmd/nowplaying && ./bin/nowplaying
+go build -o ./bin/belowdeck ./cmd/belowdeck && ./bin/belowdeck
 ```
 
 Note: Only one application can control the Stream Deck at a time. Quit the Elgato software before running.
