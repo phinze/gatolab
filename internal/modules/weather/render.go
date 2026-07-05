@@ -121,7 +121,13 @@ func (m *Module) renderStrip(rect image.Rectangle, current CurrentWeather, daily
 	// Right text: 620-790 (high/low, precip)
 
 	// ICON (left side)
+	// OpenWeatherMap's current.weather condition lags reality and often
+	// disagrees with the radar-based minutely nowcast. When the nowcast says
+	// it's actively precipitating, trust it over current.Icon/Description.
 	iconSVG, iconColor := getWeatherIcon(current.Icon)
+	if precip.Active {
+		iconSVG, iconColor = getPrecipIcon(precip.Type)
+	}
 	iconSize := 70
 	iconImg := renderSVGIcon(iconSVG, iconSize, iconColor)
 	iconX := 405
@@ -140,9 +146,11 @@ func (m *Module) renderStrip(rect image.Rectangle, current CurrentWeather, daily
 	feelsStr := fmt.Sprintf("Feels %.0f°", current.FeelsLike)
 	m.drawText(img, feelsStr, leftX, 60, m.conditionFace, colorGray)
 
-	// Condition text
+	// Condition text (nowcast wins when actively precipitating)
 	condition := current.Description
-	if condition == "" {
+	if precip.Active {
+		condition = precipLabel(precip.Type)
+	} else if condition == "" {
 		condition = current.Condition
 	}
 	if len(condition) > 0 {
@@ -210,6 +218,37 @@ func getWeatherIcon(iconCode string) (string, color.Color) {
 	default:
 		// Default to cloud
 		return iconCloudSVG, colorCloudy
+	}
+}
+
+// getPrecipIcon returns the SVG and color for an active precipitation type,
+// as reported by the minutely nowcast (see analyzePrecipitation / getPrecipType).
+func getPrecipIcon(precipType string) (string, color.Color) {
+	switch precipType {
+	case "Snow":
+		return iconCloudSnowSVG, colorSnow
+	case "Sleet":
+		return iconCloudSnowSVG, colorSnow
+	case "Storm":
+		return iconCloudLightningSVG, colorStorm
+	default: // Rain, Drizzle
+		return iconCloudRainSVG, colorRain
+	}
+}
+
+// precipLabel returns the headline condition text for an active precipitation type.
+func precipLabel(precipType string) string {
+	switch precipType {
+	case "Snow":
+		return "Snowing"
+	case "Sleet":
+		return "Sleet"
+	case "Storm":
+		return "Thunderstorm"
+	case "Drizzle":
+		return "Drizzle"
+	default: // Rain
+		return "Raining"
 	}
 }
 
