@@ -29,9 +29,13 @@ type (
 )
 
 const (
-	kCFAllocatorDefault   cfAllocatorRef  = 0
-	kCFNumberSInt16Type   cfIndex         = 2
+	kCFAllocatorDefault   cfAllocatorRef   = 0
+	kCFNumberSInt16Type   cfIndex          = 2
+	kCFNumberSInt32Type   cfIndex          = 3
 	kCFStringEncodingUTF8 cfStringEncoding = 0x08000100
+
+	kCFRunLoopRunFinished int32 = 1
+	kCFRunLoopRunStopped  int32 = 2
 
 	kIOHIDOptionsTypeNone ioOptionBits = 0
 	kIOReturnSuccess      ioReturn     = 0
@@ -39,23 +43,33 @@ const (
 
 // purego function bindings
 var (
-	cfNumberGetValue        func(number cfNumberRef, theType cfNumberType, valuePtr unsafe.Pointer) bool
-	cfRelease               func(cf cfTypeRef)
-	cfRunLoopGetCurrent     func() cfRunLoopRef
-	cfRunLoopRun            func()
-	cfRunLoopStop           func(runLoop cfRunLoopRef)
-	cfStringCreateWithBytes func(alloc cfAllocatorRef, bytes []byte, numBytes cfIndex, encoding cfStringEncoding, isExternalRepresentation bool) cfStringRef
+	cfDictionaryCreateMutable func(alloc cfAllocatorRef, capacity cfIndex, keyCallBacks, valueCallBacks uintptr) cfDictionaryRef
+	cfDictionarySetValue      func(dict cfDictionaryRef, key, value uintptr)
+	cfNumberCreate            func(alloc cfAllocatorRef, theType cfNumberType, valuePtr unsafe.Pointer) cfNumberRef
+	cfNumberGetValue          func(number cfNumberRef, theType cfNumberType, valuePtr unsafe.Pointer) bool
+	cfRelease                 func(cf cfTypeRef)
+	cfRunLoopGetCurrent       func() cfRunLoopRef
+	cfRunLoopRunInMode        func(mode cfStringRef, seconds float64, returnAfterSourceHandled bool) int32
+	cfRunLoopStop             func(runLoop cfRunLoopRef)
+	cfStringCreateWithBytes   func(alloc cfAllocatorRef, bytes []byte, numBytes cfIndex, encoding cfStringEncoding, isExternalRepresentation bool) cfStringRef
 
-	ioHIDDeviceGetProperty                 func(device ioHIDDeviceRef, key cfStringRef) cfTypeRef
-	ioHIDManagerClose                      func(manager ioHIDManagerRef, options ioOptionBits) ioReturn
-	ioHIDManagerCreate                     func(allocator cfAllocatorRef, options ioOptionBits) ioHIDManagerRef
-	ioHIDManagerOpen                       func(manager ioHIDManagerRef, options ioOptionBits) ioReturn
-	ioHIDManagerSetDeviceMatching          func(manager ioHIDManagerRef, matching cfDictionaryRef)
+	objcAutoreleasePoolPush func() uintptr
+	objcAutoreleasePoolPop  func(pool uintptr)
+
+	ioHIDDeviceGetProperty                     func(device ioHIDDeviceRef, key cfStringRef) cfTypeRef
+	ioHIDManagerClose                          func(manager ioHIDManagerRef, options ioOptionBits) ioReturn
+	ioHIDManagerCreate                         func(allocator cfAllocatorRef, options ioOptionBits) ioHIDManagerRef
+	ioHIDManagerOpen                           func(manager ioHIDManagerRef, options ioOptionBits) ioReturn
+	ioHIDManagerSetDeviceMatching              func(manager ioHIDManagerRef, matching cfDictionaryRef)
 	ioHIDManagerRegisterDeviceMatchingCallback func(manager ioHIDManagerRef, callback uintptr, context unsafe.Pointer)
-	ioHIDManagerScheduleWithRunLoop        func(manager ioHIDManagerRef, runLoop cfRunLoopRef, runLoopMode cfStringRef)
+	ioHIDManagerScheduleWithRunLoop            func(manager ioHIDManagerRef, runLoop cfRunLoopRef, runLoopMode cfStringRef)
 )
 
-var kCFRunLoopDefaultMode uintptr
+var (
+	kCFRunLoopDefaultMode           uintptr
+	kCFTypeDictionaryKeyCallBacks   uintptr
+	kCFTypeDictionaryValueCallBacks uintptr
+)
 
 func init() {
 	cf, err := purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
@@ -63,10 +77,13 @@ func init() {
 		panic(err)
 	}
 
+	purego.RegisterLibFunc(&cfDictionaryCreateMutable, cf, "CFDictionaryCreateMutable")
+	purego.RegisterLibFunc(&cfDictionarySetValue, cf, "CFDictionarySetValue")
+	purego.RegisterLibFunc(&cfNumberCreate, cf, "CFNumberCreate")
 	purego.RegisterLibFunc(&cfNumberGetValue, cf, "CFNumberGetValue")
 	purego.RegisterLibFunc(&cfRelease, cf, "CFRelease")
 	purego.RegisterLibFunc(&cfRunLoopGetCurrent, cf, "CFRunLoopGetCurrent")
-	purego.RegisterLibFunc(&cfRunLoopRun, cf, "CFRunLoopRun")
+	purego.RegisterLibFunc(&cfRunLoopRunInMode, cf, "CFRunLoopRunInMode")
 	purego.RegisterLibFunc(&cfRunLoopStop, cf, "CFRunLoopStop")
 	purego.RegisterLibFunc(&cfStringCreateWithBytes, cf, "CFStringCreateWithBytes")
 
@@ -74,6 +91,22 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	kCFTypeDictionaryKeyCallBacks, err = purego.Dlsym(cf, "kCFTypeDictionaryKeyCallBacks")
+	if err != nil {
+		panic(err)
+	}
+	kCFTypeDictionaryValueCallBacks, err = purego.Dlsym(cf, "kCFTypeDictionaryValueCallBacks")
+	if err != nil {
+		panic(err)
+	}
+
+	objc, err := purego.Dlopen("/usr/lib/libobjc.A.dylib", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
+	if err != nil {
+		panic(err)
+	}
+
+	purego.RegisterLibFunc(&objcAutoreleasePoolPush, objc, "objc_autoreleasePoolPush")
+	purego.RegisterLibFunc(&objcAutoreleasePoolPop, objc, "objc_autoreleasePoolPop")
 
 	iokit, err := purego.Dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
 	if err != nil {
@@ -144,6 +177,26 @@ func getDeviceVendorID(device ioHIDDeviceRef) (uint16, bool) {
 	return vid, true
 }
 
+// createVendorMatchingDict builds a { "VendorID": vendorID } CFDictionary for
+// IOHIDManagerSetDeviceMatching. The manager retains the dictionary, but we
+// intentionally leak our reference: this is called once per process and the
+// dictionary must outlive the manager anyway.
+func createVendorMatchingDict(vendorID uint16) cfDictionaryRef {
+	dict := cfDictionaryCreateMutable(kCFAllocatorDefault, 0, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks)
+
+	key := []byte("VendorID")
+	skey := cfStringCreateWithBytes(kCFAllocatorDefault, key, cfIndex(len(key)), kCFStringEncodingUTF8, false)
+
+	vid := int32(vendorID)
+	num := cfNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, unsafe.Pointer(&vid))
+
+	cfDictionarySetValue(dict, uintptr(skey), uintptr(num))
+	cfRelease(cfTypeRef(skey))
+	cfRelease(cfTypeRef(num))
+
+	return dict
+}
+
 // Watch returns a channel that receives a signal each time a USB HID device
 // with the given vendor ID appears on the bus. Uses IOKit's device matching
 // callback for zero-CPU-cost waiting. The watcher stops when ctx is cancelled.
@@ -166,11 +219,15 @@ func Watch(ctx context.Context, vendorID uint16) <-chan struct{} {
 			return
 		}
 
-		// Match all HID devices; we filter by vendor ID in the callback.
-		ioHIDManagerSetDeviceMatching(mgr, 0)
+		// Match only our vendor ID at the IOKit level. Matching all HID
+		// devices (dict = 0) makes the manager instantiate wrapper objects
+		// for every HID device on the system on every arrival, which
+		// accumulate in this thread's autorelease pool.
+		ioHIDManagerSetDeviceMatching(mgr, createVendorMatchingDict(vendorID))
 
 		rl := cfRunLoopGetCurrent()
-		ioHIDManagerScheduleWithRunLoop(mgr, rl, **(**cfStringRef)(unsafe.Pointer(&kCFRunLoopDefaultMode)))
+		mode := **(**cfStringRef)(unsafe.Pointer(&kCFRunLoopDefaultMode))
+		ioHIDManagerScheduleWithRunLoop(mgr, rl, mode)
 		ioHIDManagerRegisterDeviceMatchingCallback(mgr, deviceMatchingCallbackPtr, nil)
 
 		// Stop the run loop when the context is cancelled.
@@ -180,7 +237,19 @@ func Watch(ctx context.Context, vendorID uint16) <-chan struct{} {
 		}()
 
 		log.Println("usbwatch: listening for USB HID device arrivals")
-		cfRunLoopRun()
+
+		// Run the loop in bounded slices, draining the ObjC autorelease pool
+		// between them. IOHIDLib autoreleases objects on every callback, and
+		// a bare CFRunLoopRun on a Go-created thread has no pool in place, so
+		// those objects would otherwise accumulate for the life of the thread.
+		for {
+			pool := objcAutoreleasePoolPush()
+			rv := cfRunLoopRunInMode(mode, 60, false)
+			objcAutoreleasePoolPop(pool)
+			if rv == kCFRunLoopRunFinished || rv == kCFRunLoopRunStopped {
+				break
+			}
+		}
 
 		ioHIDManagerClose(mgr, kIOHIDOptionsTypeNone)
 		cfRelease(cfTypeRef(mgr))
