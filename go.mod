@@ -30,3 +30,5 @@ require (
 	golang.org/x/text v0.33.0 // indirect
 	rafaelmartins.com/p/usbhid v0.0.0-20260201162308-12aff85c336f // indirect
 )
+
+replace rafaelmartins.com/p/usbhid => github.com/phinze/usbhid v0.0.0-20260705183747-929a6150e759

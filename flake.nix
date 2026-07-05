@@ -25,7 +25,7 @@
             name = "belowdeck-source";
           };
 
-          vendorHash = "sha256-s76lwdn6o3MSOxIwExTAmdKJz8uqX2UXMOmR9yD3tWQ=";
+          vendorHash = "sha256-XfH/h6y2oSJm/+x/Bjiu0Aq/azmELXeCK6qcOQWrbhw=";
 
           # mac-sleep-notifier and usbhid use cgo
           env.CGO_ENABLED = "1";
