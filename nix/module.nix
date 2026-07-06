@@ -71,8 +71,31 @@ in
     # /nix/store), causing SIGKILL at exec.
     system.activationScripts.postActivation.text = ''
       install -d /usr/local/bin
-      cp -f ${cfg.package}/bin/belowdeck /usr/local/bin/belowdeck
-      /usr/bin/codesign --force --sign - /usr/local/bin/belowdeck
+      if [ ! -f /usr/local/bin/.belowdeck-source ] ||
+        [ "$(cat /usr/local/bin/.belowdeck-source)" != "${cfg.package}" ]; then
+        echo "belowdeck: installing ${cfg.package}" >&2
+        cp -f ${cfg.package}/bin/belowdeck /usr/local/bin/belowdeck
+        /usr/bin/codesign --force --sign - /usr/local/bin/belowdeck
+        echo "${cfg.package}" > /usr/local/bin/.belowdeck-source
+
+        # launchd caches the executable's code identity when the agent is
+        # registered. After the binary changes underneath it, respawns fail
+        # with EX_CONFIG (78) until the agent is re-registered; kickstart is
+        # not enough, only a full bootout + bootstrap re-evaluates identity.
+        # bootstrap can transiently fail while the bootout drains, so retry.
+        uid=$(/usr/bin/id -u ${cfg.user})
+        plist="/Users/${cfg.user}/Library/LaunchAgents/org.nixos.belowdeck.plist"
+        if [ -f "$plist" ]; then
+          /bin/launchctl bootout "gui/$uid/org.nixos.belowdeck" 2>/dev/null || true
+          for _ in 1 2 3 4 5; do
+            if /bin/launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null; then
+              echo "belowdeck: agent restarted" >&2
+              break
+            fi
+            sleep 1
+          done
+        fi
+      fi
     '';
 
     launchd.user.agents.belowdeck = {
