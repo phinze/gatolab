@@ -3,11 +3,14 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -142,6 +145,49 @@ func (c *Client) GetMyPRStats(ctx context.Context) (PRStats, error) {
 	return stats, nil
 }
 
+// apiError builds an error from a non-200 response.
+//
+// GitHub explains every refusal in the response body, and for throttling it
+// also names the exhausted budget in the rate limit headers. Reporting only
+// the status line, as this used to, turns a 403 into a guessing game: the
+// status alone cannot distinguish a scope problem from a primary rate limit
+// from a secondary one, and those want completely different fixes.
+func apiError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+
+	detail := strings.TrimSpace(string(body))
+	var payload struct {
+		Message          string `json:"message"`
+		DocumentationURL string `json:"documentation_url"`
+	}
+	if json.Unmarshal(body, &payload) == nil && payload.Message != "" {
+		detail = payload.Message
+		if payload.DocumentationURL != "" {
+			detail += " (" + payload.DocumentationURL + ")"
+		}
+	}
+
+	msg := "API error: " + resp.Status
+	if detail != "" {
+		msg += ": " + detail
+	}
+
+	if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		resets := "an unknown time"
+		if sec, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			resets = "in " + time.Until(time.Unix(sec, 0)).Round(time.Second).String()
+		}
+		msg += fmt.Sprintf(" [%s budget exhausted (limit %s), resets %s]",
+			resp.Header.Get("X-RateLimit-Resource"),
+			resp.Header.Get("X-RateLimit-Limit"),
+			resets)
+	} else if retry := resp.Header.Get("Retry-After"); retry != "" {
+		msg += " [secondary rate limit, retry after " + retry + "s]"
+	}
+
+	return errors.New(msg)
+}
+
 // getAuthenticatedUser returns the authenticated user's login (cached after first call).
 func (c *Client) getAuthenticatedUser(ctx context.Context) (string, error) {
 	// Return cached username if available
@@ -164,7 +210,7 @@ func (c *Client) getAuthenticatedUser(ctx context.Context) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API error: %s", resp.Status)
+		return "", apiError(resp)
 	}
 
 	var user struct {
@@ -198,7 +244,7 @@ func (c *Client) searchPRCount(ctx context.Context, query string) (int, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("API error: %s", resp.Status)
+		return 0, apiError(resp)
 	}
 
 	var result struct {
@@ -397,7 +443,7 @@ func (c *Client) searchPRs(ctx context.Context, query string, status PRStatus) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error: %s", resp.Status)
+		return nil, apiError(resp)
 	}
 
 	var searchResult struct {
