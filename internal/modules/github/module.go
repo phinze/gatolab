@@ -366,9 +366,15 @@ func (m *Module) HandleOverlayStripTouch(event module.TouchStripEvent) error {
 
 // openURL opens a URL in the default browser.
 func (m *Module) openURL(url string) {
-	if err := exec.Command("open", url).Start(); err != nil {
-		log.Printf("Failed to open URL %s: %v", url, err)
-	}
+	// Run, not Start: `open` exits as soon as it hands off to the browser, and
+	// with no Wait it lingers as a zombie for the life of the daemon. Run in a
+	// goroutine to keep the key handler non-blocking, matching how the other
+	// modules shell out.
+	go func() {
+		if err := exec.Command("open", url).Run(); err != nil {
+			log.Printf("Failed to open URL %s: %v", url, err)
+		}
+	}()
 }
 
 // IsOverlayActive returns true if the PR list overlay is visible.
