@@ -64,6 +64,9 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 	username   string // cached username
+
+	// sem admits one request at a time; see do.
+	sem chan struct{}
 }
 
 // NewClient creates a new GitHub API client using the gh CLI token.
@@ -85,6 +88,7 @@ func NewClient() (*Client, error) {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		sem: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -145,6 +149,34 @@ func (c *Client) GetMyPRStats(ctx context.Context) (PRStats, error) {
 	return stats, nil
 }
 
+// do sends a request with the standard headers, serialized against every other
+// request from this client.
+//
+// GitHub's secondary rate limit is about concurrency rather than volume: the
+// docs ask callers to "make requests for a single user or client ID serially,"
+// and this client used to do the opposite. A refresh fans out three searches
+// for PR stats, three more for the list, then one request per PR for CI status
+// and another per PR for details, all on their own goroutines. At eight open
+// PRs that is roughly two dozen requests landing at once, which GitHub started
+// refusing outright with a 403 once the PR count grew past the threshold.
+//
+// Admitting one request at a time costs a couple of seconds per refresh, which
+// is nothing against a two minute cadence, and keeps us inside the documented
+// contract no matter how many PRs are open.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	select {
+	case c.sem <- struct{}{}:
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
+	defer func() { <-c.sem }()
+
+	return c.httpClient.Do(req)
+}
+
 // apiError builds an error from a non-200 response.
 //
 // GitHub explains every refusal in the response body, and for throttling it
@@ -200,10 +232,7 @@ func (c *Client) getAuthenticatedUser(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", err
 	}
@@ -234,10 +263,7 @@ func (c *Client) searchPRCount(ctx context.Context, query string) (int, error) {
 		return 0, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -394,10 +420,7 @@ func (c *Client) getCIStatus(ctx context.Context, repo, sha string) CIStatus {
 		return CIStatusPending
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return CIStatusPending
 	}
@@ -433,10 +456,7 @@ func (c *Client) searchPRs(ctx context.Context, query string, status PRStatus) (
 		return nil, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -523,10 +543,7 @@ func (c *Client) getPRDetails(ctx context.Context, repo string, number int) prDe
 		return prDetails{}
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return prDetails{}
 	}
