@@ -127,14 +127,28 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 // any future enumeration from succeeding.
 var enumInFlight atomic.Bool
 
+// enumStuckWarned latches the "enumeration still in flight" warning so it is
+// logged once per episode instead of on every rejected probe. waitForHardwareDevice
+// now polls on a timer, and without the latch a permanently stuck enumeration
+// would print a line every few seconds forever.
+var enumStuckWarned atomic.Bool
+
 // tryGetDeviceWithTimeout attempts to get and open a Stream Deck device with a timeout.
 // Returns the device if successful, nil otherwise. Only one enumeration goroutine is
 // allowed in flight at a time to prevent IOKit resource contention.
 func tryGetDeviceWithTimeout(timeout time.Duration) *streamdeck.Device {
 	// If a previous enumeration is still stuck in CGO, don't spawn another.
+	// enumInFlight is only cleared by the enumeration goroutine's defer, so a
+	// permanent CGO hang wedges probing for the life of the process. Say so
+	// out loud rather than returning nil silently until someone notices the
+	// deck has been dark for a day.
 	if !enumInFlight.CompareAndSwap(false, true) {
+		if enumStuckWarned.CompareAndSwap(false, true) {
+			log.Println("Device enumeration still in flight from an earlier probe; skipping probes until it returns")
+		}
 		return nil
 	}
+	enumStuckWarned.Store(false)
 
 	type result struct {
 		dev *streamdeck.Device
@@ -178,10 +192,17 @@ func tryGetDeviceWithTimeout(timeout time.Duration) *streamdeck.Device {
 
 // waitForHardwareDevice waits for a Stream Deck device using event-driven USB
 // detection. The deviceArrivedCh fires when IOKit detects a matching HID device,
-// eliminating the need for periodic polling. Wake signals are kept as a fallback
-// for sleep/wake edge cases.
+// so the common case settles immediately and costs no polling. Wake signals are
+// kept as a fallback for sleep/wake edge cases, and a backing-off timer covers
+// the case where the probe fails on an edge that will never repeat.
 func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}, deviceArrivedCh <-chan struct{}) device.Device {
-	const deviceTimeout = 5 * time.Second
+	const (
+		deviceTimeout = 5 * time.Second
+
+		// Bounds for the polling backstop below.
+		retryMin = 1 * time.Second
+		retryMax = 30 * time.Second
+	)
 
 	// First, try to get an already-connected device
 	if dev := tryGetDeviceWithTimeout(deviceTimeout); dev != nil {
@@ -190,12 +211,25 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}, deviceAr
 
 	log.Println("Waiting for device...")
 
+	// deviceArrivedCh and wakeCh are both edge-triggered, which leaves a hole:
+	// a probe that fails at the instant of the edge waits forever for an edge
+	// that cannot repeat while the deck stays plugged in. That is exactly what
+	// happens when launchd respawns us before the previous process's exclusive
+	// HID handle is released - the deck sits dark with the daemon apparently
+	// healthy. Poll as a level-triggered backstop, backing off so an unplugged
+	// deck doesn't mean enumerating IOKit every second indefinitely.
+	retryDelay := retryMin
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-deviceArrivedCh:
 			log.Println("USB device arrival detected, probing...")
+			retryDelay = retryMin
+		case <-time.After(retryDelay):
+			// Quiet on purpose: this fires on a timer, and tryGetDeviceWithTimeout
+			// logs the failures that are actually worth reading.
 		case <-wakeCh:
 			// After wake, USB devices may take several seconds to enumerate.
 			// Retry multiple times with short delays instead of just checking once.
@@ -212,12 +246,17 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}, deviceAr
 				}
 			}
 			log.Println("Device not found after wake, resuming wait...")
+			retryDelay = retryMin
 			continue
 		}
 
 		if dev := tryGetDeviceWithTimeout(deviceTimeout); dev != nil {
 			log.Println("Device connected!")
 			return device.NewHardware(dev)
+		}
+
+		if retryDelay *= 2; retryDelay > retryMax {
+			retryDelay = retryMax
 		}
 	}
 }
@@ -226,11 +265,29 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}, deviceAr
 func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, wakeCh <-chan struct{}) {
 	log.Printf("Connected to: %s", dev.GetModelName())
 
-	// Set brightness and clear keys
-	dev.SetBrightness(80)
-	dev.ForEachKey(func(key device.KeyID) error {
-		return dev.ClearKey(key)
-	})
+	// Set brightness and clear keys.
+	//
+	// These are the first writes after open, and they can block forever:
+	// usbhid's setReport waits on a completion callback with no timeout, and a
+	// runloop that came back wedged from sleep never delivers one. Observed in
+	// the wild as a daemon parked 21 hours in SetBrightness with a dark deck.
+	// Same wedge the close path below already guards against, so same remedy:
+	// give up and let launchd hand us a fresh process with a fresh runloop.
+	initDone := make(chan struct{})
+	go func() {
+		dev.SetBrightness(80)
+		dev.ForEachKey(func(key device.KeyID) error {
+			return dev.ClearKey(key)
+		})
+		close(initDone)
+	}()
+
+	select {
+	case <-initDone:
+	case <-time.After(5 * time.Second):
+		log.Println("Device init timed out, exiting for clean respawn")
+		os.Exit(1)
+	}
 
 	// Create coordinator and modules fresh for each connection
 	coord := coordinator.New(dev)
