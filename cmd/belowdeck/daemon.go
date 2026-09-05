@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -261,6 +264,72 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}, deviceAr
 	}
 }
 
+// Consecutive device-init timeouts are tracked on disk because each one ends
+// the process, so an in-memory counter would always read one.
+const (
+	// A streak older than this is treated as unrelated history.
+	initFailureWindow = 5 * time.Minute
+	// Failures before we stop assuming a respawn will help and say so.
+	initFailureLoud = 3
+	// Ceiling on how long we stall before exiting.
+	initBackoffMax = 2 * time.Minute
+)
+
+func initFailurePath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "belowdeck-init-failures")
+}
+
+// noteInitFailure records another init timeout and returns the length of the
+// current streak.
+func noteInitFailure() int {
+	count := 0
+	if b, err := os.ReadFile(initFailurePath()); err == nil {
+		var n int
+		var unix int64
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(b)), "%d %d", &n, &unix); err == nil {
+			if time.Since(time.Unix(unix, 0)) < initFailureWindow {
+				count = n
+			}
+		}
+	}
+	count++
+	path := initFailurePath()
+	// The cache directory is not guaranteed to exist. Without this the write
+	// fails silently, the streak never advances, and the loud message that
+	// tells a human to replug the device never fires.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("Warning: cannot record init failure streak: %v", err)
+		return count
+	}
+	if err := os.WriteFile(path,
+		[]byte(fmt.Sprintf("%d %d", count, time.Now().Unix())), 0o644); err != nil {
+		log.Printf("Warning: cannot record init failure streak: %v", err)
+	}
+	return count
+}
+
+func clearInitFailures() {
+	_ = os.Remove(initFailurePath())
+}
+
+// initBackoff stalls a failing process before it exits. launchd already floors
+// respawns at ten seconds, which is the right pace for a wedge a new process
+// can clear and far too fast for one it cannot.
+func initBackoff(failures int) time.Duration {
+	if failures < initFailureLoud {
+		return 0
+	}
+	d := time.Duration(failures-initFailureLoud+1) * 15 * time.Second
+	if d > initBackoffMax {
+		d = initBackoffMax
+	}
+	return d
+}
+
 // runWithDevice runs the coordinator with the given device until disconnect, wake, or context cancel.
 func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, wakeCh <-chan struct{}) {
 	log.Printf("Connected to: %s", dev.GetModelName())
@@ -273,6 +342,14 @@ func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, w
 	// the wild as a daemon parked 21 hours in SetBrightness with a dark deck.
 	// Same wedge the close path below already guards against, so same remedy:
 	// give up and let launchd hand us a fresh process with a fresh runloop.
+	//
+	// That remedy only works when the wedge lives in this process. When it
+	// lives in the device, every fresh process blocks in exactly the same
+	// place, and exiting turns one silent hang into an endless respawn loop.
+	// Observed in the wild: six restarts in ninety seconds, all identical,
+	// until the deck was physically unplugged. So count the streak, slow down
+	// once it is clear that respawning is not helping, and say the one thing
+	// that actually fixes it.
 	initDone := make(chan struct{})
 	go func() {
 		dev.SetBrightness(80)
@@ -284,8 +361,20 @@ func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, w
 
 	select {
 	case <-initDone:
+		clearInitFailures()
 	case <-time.After(5 * time.Second):
-		log.Println("Device init timed out, exiting for clean respawn")
+		failures := noteInitFailure()
+		if failures >= initFailureLoud {
+			log.Printf("Device init timed out %d times in a row, each on a fresh process. "+
+				"The Stream Deck's HID endpoint is wedged and respawning will not clear it: "+
+				"unplug the device and plug it back in.", failures)
+		} else {
+			log.Println("Device init timed out, exiting for clean respawn")
+		}
+		if d := initBackoff(failures); d > 0 {
+			log.Printf("Backing off %s before exiting", d)
+			time.Sleep(d)
+		}
 		os.Exit(1)
 	}
 
